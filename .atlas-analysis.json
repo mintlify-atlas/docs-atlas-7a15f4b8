@@ -1,0 +1,141 @@
+{
+  "projectType": "framework",
+  "projectName": "Durable Streams",
+  "projectDescription": "HTTP-based protocol for real-time sync and streaming data to client applications",
+  "theme": "aspen",
+  "primaryColor": "#0066CC",
+  "lightColor": "#3399FF",
+  "darkColor": "#004C99",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/protocol-overview",
+              "concepts/streams-and-offsets",
+              "concepts/message-framing",
+              "concepts/live-modes",
+              "concepts/idempotent-producers",
+              "concepts/caching-and-fanout"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/basic-usage",
+              "guides/resumable-streaming",
+              "guides/real-time-subscriptions",
+              "guides/error-handling",
+              "guides/production-deployment"
+            ]
+          },
+          {
+            "group": "Use Cases",
+            "pages": [
+              "use-cases/database-sync",
+              "use-cases/ai-streaming",
+              "use-cases/event-sourcing",
+              "use-cases/collaborative-editing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Client Libraries",
+            "pages": [
+              "api/client-typescript",
+              "api/client-python",
+              "api/client-go",
+              "api/client-elixir",
+              "api/client-dotnet",
+              "api/client-swift",
+              "api/client-php",
+              "api/client-java",
+              "api/client-rust",
+              "api/client-ruby"
+            ]
+          },
+          {
+            "group": "Server",
+            "pages": [
+              "api/server-nodejs",
+              "api/server-caddy"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "api/cli-commands"
+            ]
+          },
+          {
+            "group": "Protocol",
+            "pages": [
+              "protocol/http-operations",
+              "protocol/headers",
+              "protocol/status-codes"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Resources",
+        "groups": [
+          {
+            "group": "Testing",
+            "pages": [
+              "resources/conformance-tests",
+              "resources/benchmarking"
+            ]
+          },
+          {
+            "group": "Community",
+            "pages": [
+              "resources/contributing",
+              "resources/community-implementations"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "HTTP-based durable, append-only streams",
+    "Offset-based resumable reads",
+    "Real-time live tailing with long-poll and SSE",
+    "Idempotent producer with exactly-once delivery",
+    "CDN-friendly caching and request collapsing",
+    "Multi-language client libraries (10 languages)",
+    "Content-type agnostic byte streams",
+    "Conformance test suite for validation"
+  ],
+  "publicApiSurface": [
+    "DurableStream.create()",
+    "DurableStream.stream()",
+    "DurableStream.append()",
+    "IdempotentProducer",
+    "StreamResponse.text()",
+    "StreamResponse.json()",
+    "StreamResponse.subscribe()",
+    "StreamResponse.subscribeJson()",
+    "PUT /stream/{path} - Create stream",
+    "POST /stream/{path} - Append to stream",
+    "GET /stream/{path}?offset=X - Read stream",
+    "DELETE /stream/{path} - Delete stream",
+    "HEAD /stream/{path} - Get metadata"
+  ]
+}
