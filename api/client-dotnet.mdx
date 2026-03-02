@@ -1,0 +1,503 @@
+---
+title: ".NET Client"
+description: "API reference for the DurableStreams .NET library"
+---
+
+# .NET Client
+
+The official .NET client for Durable Streams protocol with async/await support.
+
+## Installation
+
+```bash
+dotnet add package DurableStreams
+```
+
+Requires .NET 6.0 or later
+
+## Quick Start
+
+```csharp
+using DurableStreams;
+
+// Create a client (singleton pattern recommended)
+var client = new DurableStreamClient();
+
+// Get a stream handle
+var stream = client.GetStream("https://streams.example.com/my-stream");
+
+// Create the stream
+await stream.CreateAsync(new CreateStreamOptions
+{
+    ContentType = "application/json"
+});
+
+// Append data
+var json = JsonSerializer.Serialize(new { message = "hello" });
+await stream.AppendAsync(Encoding.UTF8.GetBytes(json));
+
+// Read data
+await foreach (var batch in stream.ReadJsonAsync<Event>())
+{
+    foreach (var item in batch.Items)
+    {
+        Console.WriteLine($"Event: {item.Id}");
+    }
+    // Save checkpoint
+    await SaveOffsetAsync(batch.Offset);
+}
+```
+
+## Core APIs
+
+### DurableStreamClient
+
+The main client class (thread-safe, designed for singleton use).
+
+<ParamField path="new DurableStreamClient()" type="constructor">
+  Create a client with default options
+</ParamField>
+
+<ParamField path="new DurableStreamClient(options)" type="constructor">
+  Create a client with custom options
+
+  <ParamField path="options" type="DurableStreamClientOptions">
+    <ParamField path="BaseUrl" type="string">
+      Base URL for relative stream paths
+    </ParamField>
+    <ParamField path="Timeout" type="TimeSpan?">
+      Default request timeout
+    </ParamField>
+    <ParamField path="DefaultHeaders" type="Dictionary<string, string>">
+      Static headers for all requests
+    </ParamField>
+    <ParamField path="DynamicHeaders" type="Dictionary<string, Func<CancellationToken, Task<string>>>">
+      Dynamic headers (evaluated per-request)
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+**Example:**
+
+```csharp
+var client = new DurableStreamClient(new DurableStreamClientOptions
+{
+    BaseUrl = "https://streams.example.com",
+    Timeout = TimeSpan.FromSeconds(30),
+    DefaultHeaders = new Dictionary<string, string>
+    {
+        ["Authorization"] = "Bearer token123"
+    },
+    DynamicHeaders = new Dictionary<string, Func<CancellationToken, Task<string>>>
+    {
+        ["X-Request-ID"] = async ct => Guid.NewGuid().ToString()
+    }
+});
+```
+
+<ParamField path="GetStream()" type="method">
+  Get a handle to a stream (no network I/O)
+
+  <ParamField path="url" type="string" required>
+    Stream URL (absolute or relative to BaseUrl)
+  </ParamField>
+
+  Returns: `DurableStream`
+</ParamField>
+
+<ParamField path="CreateStreamAsync()" type="method">
+  Create a new stream and return a handle
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="options" type="CreateStreamOptions?">
+    Creation options
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task<DurableStream>`
+</ParamField>
+
+<ParamField path="ConnectAsync()" type="method">
+  Connect to an existing stream (validates via HEAD)
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task<DurableStream>`
+</ParamField>
+
+### DurableStream
+
+Handle to a durable stream for read/write operations.
+
+#### Write Operations
+
+<ParamField path="CreateAsync()" type="method">
+  Create this stream on the server
+
+  <ParamField path="options" type="CreateStreamOptions?">
+    <ParamField path="ContentType" type="string">
+      Content type (e.g., `"application/json"`)
+    </ParamField>
+    <ParamField path="TtlSeconds" type="int?">
+      Time-to-live in seconds
+    </ParamField>
+    <ParamField path="ExpiresAt" type="DateTimeOffset?">
+      Absolute expiry time
+    </ParamField>
+    <ParamField path="Closed" type="bool" default="false">
+      Create in closed state
+    </ParamField>
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task`
+</ParamField>
+
+<ParamField path="AppendAsync()" type="method">
+  Append data to the stream
+
+  <ParamField path="data" type="byte[]" required>
+    Data to append (for JSON streams, serialize first)
+  </ParamField>
+  <ParamField path="options" type="AppendOptions?">
+    <ParamField path="Seq" type="string">
+      Writer coordination sequence
+    </ParamField>
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task<AppendResult>` with `NextOffset`
+</ParamField>
+
+**Example:**
+
+```csharp
+// JSON stream
+var json = JsonSerializer.Serialize(new { message = "hello" });
+var result = await stream.AppendAsync(Encoding.UTF8.GetBytes(json));
+Console.WriteLine($"Offset: {result.NextOffset}");
+
+// Byte stream
+var result = await stream.AppendAsync(Encoding.UTF8.GetBytes("raw text"));
+```
+
+<ParamField path="CloseAsync()" type="method">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="options" type="CloseOptions?">
+    <ParamField path="Data" type="byte[]">
+      Optional final message
+    </ParamField>
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task<CloseResult>` with `FinalOffset`
+</ParamField>
+
+<ParamField path="DeleteAsync()" type="method">
+  Delete the stream
+
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task`
+</ParamField>
+
+#### Read Operations
+
+<ParamField path="ReadJsonAsync<T>()" type="method">
+  Read JSON batches as an async enumerable
+
+  <ParamField path="options" type="ReadOptions?">
+    <ParamField path="Offset" type="Offset?" default="Offset.Start">
+      Starting offset
+    </ParamField>
+    <ParamField path="LiveMode" type="LiveMode" default="LiveMode.Auto">
+      Live mode: `Off`, `Auto`, `LongPoll`, `Sse`
+    </ParamField>
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `IAsyncEnumerable<JsonBatch<T>>`
+</ParamField>
+
+**Example:**
+
+```csharp
+public record Event(string Id, string Type, object Data);
+
+await foreach (var batch in stream.ReadJsonAsync<Event>(new ReadOptions
+{
+    Offset = lastOffset,
+    LiveMode = LiveMode.LongPoll
+}))
+{
+    foreach (var evt in batch.Items)
+    {
+        Console.WriteLine($"Event {evt.Id}: {evt.Type}");
+    }
+
+    // Save checkpoint
+    await db.SaveOffsetAsync(batch.Offset);
+}
+```
+
+<ParamField path="ReadBytesAsync()" type="method">
+  Read raw byte chunks as an async enumerable
+
+  <ParamField path="options" type="ReadOptions?">
+    Read options
+  </ParamField>
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `IAsyncEnumerable<ByteChunk>`
+</ParamField>
+
+<ParamField path="HeadAsync()" type="method">
+  Get stream metadata via HEAD request
+
+  <ParamField path="cancellationToken" type="CancellationToken" default="default">
+    Cancellation token
+  </ParamField>
+
+  Returns: `Task<StreamCheckpoint>` with `ContentType`, `Offset`, `StreamClosed`
+</ParamField>
+
+### IdempotentProducer
+
+Exactly-once writes with automatic batching and pipelining.
+
+```csharp
+var producer = new IdempotentProducer(stream, "order-service-1", new IdempotentProducerOptions
+{
+    Epoch = 0,
+    AutoClaim = true,
+    MaxBatchBytes = 1024 * 1024,
+    LingerMs = 5,
+    MaxInFlight = 5
+});
+
+// Fire-and-forget writes
+producer.Append(Encoding.UTF8.GetBytes("{\"orderId\":\"123\"}"));
+producer.Append(Encoding.UTF8.GetBytes("{\"orderId\":\"456\"}"));
+
+// Ensure delivery
+await producer.FlushAsync();
+await producer.CloseAsync();
+```
+
+<ParamField path="new IdempotentProducer()" type="constructor">
+  Create an idempotent producer
+
+  <ParamField path="stream" type="DurableStream" required>
+    Target stream
+  </ParamField>
+  <ParamField path="producerId" type="string" required>
+    Stable identifier
+  </ParamField>
+  <ParamField path="options" type="IdempotentProducerOptions">
+    <ParamField path="Epoch" type="int" default="0">
+      Starting epoch
+    </ParamField>
+    <ParamField path="AutoClaim" type="bool" default="false">
+      Auto-retry with epoch+1 on 403
+    </ParamField>
+    <ParamField path="MaxBatchBytes" type="int" default="1048576">
+      Max batch size (1MB)
+    </ParamField>
+    <ParamField path="LingerMs" type="int" default="5">
+      Max wait before sending batch
+    </ParamField>
+    <ParamField path="MaxInFlight" type="int" default="5">
+      Max concurrent batches
+    </ParamField>
+    <ParamField path="OnError" type="Action<Exception>">
+      Error callback
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+<ParamField path="Append()" type="method">
+  Fire-and-forget append (synchronous, returns immediately)
+
+  <ParamField path="data" type="byte[]" required>
+    Data to append
+  </ParamField>
+</ParamField>
+
+<ParamField path="FlushAsync()" type="method">
+  Send pending batch and wait for all in-flight batches
+
+  Returns: `Task`
+</ParamField>
+
+<ParamField path="CloseAsync()" type="method">
+  Close the stream with producer headers (idempotent)
+
+  <ParamField path="finalMessage" type="byte[]?">
+    Optional final message
+  </ParamField>
+
+  Returns: `Task<CloseResult>`
+</ParamField>
+
+## Types
+
+### Offset
+
+```csharp
+public record Offset(string Value)
+{
+    public static Offset Start { get; } = new Offset("-1");
+    public bool IsStart => Value == "-1";
+}
+```
+
+### LiveMode
+
+```csharp
+public enum LiveMode
+{
+    Off,       // Catch-up only
+    Auto,      // Auto-select (SSE for JSON, long-poll for binary)
+    LongPoll,  // Explicit long-polling
+    Sse        // Explicit Server-Sent Events
+}
+```
+
+### JsonBatch&lt;T&gt;
+
+```csharp
+public record JsonBatch<T>
+{
+    public IReadOnlyList<T> Items { get; init; }
+    public Offset Offset { get; init; }
+    public bool UpToDate { get; init; }
+    public string? Cursor { get; init; }
+    public bool StreamClosed { get; init; }
+}
+```
+
+## Error Handling
+
+```csharp
+using DurableStreams.Exceptions;
+
+try
+{
+    await stream.AppendAsync(data);
+}
+catch (StreamNotFoundException ex)
+{
+    Console.WriteLine($"Stream not found: {ex.Url}");
+}
+catch (StreamClosedException ex)
+{
+    Console.WriteLine($"Stream closed: {ex.Url}");
+}
+catch (DurableStreamException ex)
+{
+    Console.WriteLine($"Error {ex.StatusCode}: {ex.Message}");
+}
+```
+
+### Exception Hierarchy
+
+- `DurableStreamException` - Base exception
+  - `StreamNotFoundException` - 404
+  - `StreamExistsException` - 409 on create
+  - `StreamClosedException` - 409 with Stream-Closed header
+  - `SequenceConflictException` - 409 sequence conflict
+  - `StaleEpochException` - 403 for producers
+
+## Advanced Features
+
+### Dependency Injection
+
+```csharp
+// In Startup.cs or Program.cs
+services.AddSingleton(new DurableStreamClient(new DurableStreamClientOptions
+{
+    BaseUrl = "https://streams.example.com"
+}));
+
+// In your service
+public class EventService
+{
+    private readonly DurableStreamClient _client;
+
+    public EventService(DurableStreamClient client)
+    {
+        _client = client;
+    }
+
+    public async Task PublishAsync(Event evt)
+    {
+        var stream = _client.GetStream("/events");
+        var json = JsonSerializer.Serialize(evt);
+        await stream.AppendAsync(Encoding.UTF8.GetBytes(json));
+    }
+}
+```
+
+### IHttpClientFactory Integration
+
+```csharp
+services.AddHttpClient("DurableStreams")
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+        MaxConnectionsPerServer = 100
+    });
+
+var httpClient = serviceProvider
+    .GetRequiredService<IHttpClientFactory>()
+    .CreateClient("DurableStreams");
+
+var client = new DurableStreamClient(
+    new DurableStreamClientOptions(),
+    httpClient
+);
+```
+
+### Cancellation
+
+```csharp
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+try
+{
+    await foreach (var batch in stream.ReadJsonAsync<Event>(cancellationToken: cts.Token))
+    {
+        // Process batch
+    }
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Operation cancelled");
+}
+```
+
+## Source Code
+
+Source: [packages/client-dotnet/src/DurableStreams/](/source/packages/client-dotnet/src/DurableStreams/DurableStreamClient.cs)

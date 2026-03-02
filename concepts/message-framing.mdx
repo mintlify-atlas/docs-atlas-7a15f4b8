@@ -1,0 +1,479 @@
+---
+title: Message Framing
+description: How Durable Streams handles message boundaries across different content types
+---
+
+Durable Streams operates at the byte level, but different content types handle message boundaries differently. Understanding message framing is crucial for correctly reading and writing structured data.
+
+## Content types overview
+
+When you create a stream, you specify a MIME content type that determines how data is framed:
+
+<CodeGroup>
+
+```typescript TypeScript
+// JSON mode - automatic message boundary preservation
+const jsonStream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/json'
+})
+
+// Byte mode - raw binary data
+const byteStream = await DurableStream.create({
+  url: 'https://streams.example.com/logs',
+  contentType: 'text/plain'
+})
+```
+
+```python Python
+# JSON mode - automatic message boundary preservation
+json_stream = DurableStream.create(
+    url='https://streams.example.com/events',
+    content_type='application/json'
+)
+
+# Byte mode - raw binary data
+byte_stream = DurableStream.create(
+    url='https://streams.example.com/logs',
+    content_type='text/plain'
+)
+```
+
+</CodeGroup>
+
+## JSON mode (`application/json`)
+
+JSON mode provides **automatic message boundary preservation**. Each append operation stores messages as distinct units, and reads return data as JSON arrays.
+
+### Message boundaries
+
+<Info>
+The server preserves message boundaries automatically. You append individual JSON values, and they're stored and retrieved as separate messages.
+</Info>
+
+<CodeGroup>
+
+```typescript TypeScript
+import { DurableStream } from '@durable-streams/client'
+
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/json'
+})
+
+// Append individual messages (pre-serialized JSON strings)
+await stream.append(JSON.stringify({ event: 'created', id: 1 }))
+await stream.append(JSON.stringify({ event: 'updated', id: 2 }))
+
+// Read returns array of messages
+const response = await stream.stream()
+const messages = await response.json()
+console.log(messages)
+// [{ event: 'created', id: 1 }, { event: 'updated', id: 2 }]
+```
+
+```python Python
+from durable_streams import DurableStream
+import json
+
+stream = DurableStream.create(
+    url='https://streams.example.com/events',
+    content_type='application/json'
+)
+
+# Append individual messages (pre-serialized JSON strings)
+stream.append(json.dumps({'event': 'created', 'id': 1}))
+stream.append(json.dumps({'event': 'updated', 'id': 2}))
+
+# Read returns array of messages
+response = stream.stream()
+messages = response.json()
+print(messages)
+# [{'event': 'created', 'id': 1}, {'event': 'updated', 'id': 2}]
+```
+
+</CodeGroup>
+
+### Array flattening for batching
+
+When you POST a JSON array, the server **flattens exactly one level**, treating each element as a separate message:
+
+<Steps>
+
+### Single value
+
+POST body: `{"event": "created"}`  
+Stores: **1 message** → `{"event": "created"}`
+
+### Array of objects
+
+POST body: `[{"event": "a"}, {"event": "b"}]`  
+Stores: **2 messages** → `{"event": "a"}`, `{"event": "b"}`
+
+### Array of arrays
+
+POST body: `[[1,2], [3,4]]`  
+Stores: **2 messages** → `[1,2]`, `[3,4]`
+
+### Nested arrays
+
+POST body: `[[[1,2,3]]]`  
+Stores: **1 message** → `[[1,2,3]]`
+
+</Steps>
+
+<Note>
+Client libraries may automatically wrap individual values in arrays for batching. For example, calling `append({"x": 1})` might send `[{"x": 1}]` to the server, which flattens it to store one message: `{"x": 1}`.
+</Note>
+
+### Empty arrays
+
+<Warning>
+Servers reject POST requests with empty JSON arrays (`[]`) with `400 Bad Request`. Empty arrays represent no-op operations with no semantic meaning and likely indicate a client bug.
+</Warning>
+
+```typescript
+// ❌ Invalid: Empty array
+await stream.append('[]')  // Throws 400 Bad Request
+
+// ✅ Valid: Create empty stream
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/json',
+  body: '[]'  // OK for PUT (creates empty stream)
+})
+```
+
+### Batching multiple messages
+
+You can efficiently batch multiple messages in a single HTTP request:
+
+<CodeGroup>
+
+```typescript TypeScript
+// Client automatically batches for efficiency
+await stream.append(JSON.stringify({ id: 1 }))
+await stream.append(JSON.stringify({ id: 2 }))
+await stream.append(JSON.stringify({ id: 3 }))
+// May be sent as: [{"id":1},{"id":2},{"id":3}]
+// Server stores 3 separate messages
+
+// Or explicitly batch yourself:
+const batch = [
+  { id: 1, name: 'Alice' },
+  { id: 2, name: 'Bob' },
+  { id: 3, name: 'Charlie' }
+]
+await stream.append(JSON.stringify(batch))
+// Server stores 3 separate messages
+```
+
+```python Python
+# Client automatically batches for efficiency
+stream.append(json.dumps({'id': 1}))
+stream.append(json.dumps({'id': 2}))
+stream.append(json.dumps({'id': 3}))
+# May be sent as: [{"id":1},{"id":2},{"id":3}]
+# Server stores 3 separate messages
+
+# Or explicitly batch yourself:
+batch = [
+    {'id': 1, 'name': 'Alice'},
+    {'id': 2, 'name': 'Bob'},
+    {'id': 3, 'name': 'Charlie'}
+]
+stream.append(json.dumps(batch))
+# Server stores 3 separate messages
+```
+
+</CodeGroup>
+
+### JSON validation
+
+<Warning>
+Servers validate that appended data is valid JSON. Invalid JSON results in `400 Bad Request`.
+</Warning>
+
+```typescript
+// ❌ Invalid JSON
+await stream.append('not valid json')  // 400 Bad Request
+
+// ✅ Valid JSON
+await stream.append(JSON.stringify({ valid: true }))  // OK
+```
+
+## Byte mode (all other content types)
+
+For all non-JSON content types, the protocol operates at the **raw byte level**. The server does not interpret message boundaries—you're responsible for framing.
+
+### Raw concatenation
+
+<Info>
+Multiple appends are simply concatenated as raw bytes. No delimiters or boundaries are added.
+</Info>
+
+<CodeGroup>
+
+```typescript TypeScript
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/logs',
+  contentType: 'text/plain'
+})
+
+// Three separate appends
+await stream.append('Hello ')
+await stream.append('world')
+await stream.append('!')
+
+// Read returns concatenated bytes
+const response = await stream.stream()
+const text = await response.text()
+console.log(text)  // "Hello world!"
+```
+
+```python Python
+stream = DurableStream.create(
+    url='https://streams.example.com/logs',
+    content_type='text/plain'
+)
+
+# Three separate appends
+stream.append('Hello ')
+stream.append('world')
+stream.append('!')
+
+# Read returns concatenated bytes
+response = stream.stream()
+text = response.text()
+print(text)  # "Hello world!"
+```
+
+</CodeGroup>
+
+### Newline-delimited JSON (NDJSON)
+
+For NDJSON streams, you manually add newlines:
+
+<CodeGroup>
+
+```typescript TypeScript
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/x-ndjson'
+})
+
+// Manually add newlines for message boundaries
+await stream.append(JSON.stringify({ event: 'a' }) + '\n')
+await stream.append(JSON.stringify({ event: 'b' }) + '\n')
+
+// Read and parse line-by-line
+const response = await stream.stream()
+for await (const chunk of response.textStream()) {
+  const lines = chunk.split('\n').filter(line => line.trim())
+  for (const line of lines) {
+    const event = JSON.parse(line)
+    console.log(event)
+  }
+}
+```
+
+```python Python
+stream = DurableStream.create(
+    url='https://streams.example.com/events',
+    content_type='application/x-ndjson'
+)
+
+# Manually add newlines for message boundaries
+stream.append(json.dumps({'event': 'a'}) + '\n')
+stream.append(json.dumps({'event': 'b'}) + '\n')
+
+# Read and parse line-by-line
+response = stream.stream()
+for chunk in response.text_stream():
+    lines = [l for l in chunk.split('\n') if l.strip()]
+    for line in lines:
+        event = json.loads(line)
+        print(event)
+```
+
+</CodeGroup>
+
+### Protocol Buffers
+
+For binary formats like Protocol Buffers, include length prefixes:
+
+```typescript
+import { DurableStream } from '@durable-streams/client'
+
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/x-protobuf'
+})
+
+// Encode message with length prefix
+function encodeMessage(proto: Uint8Array): Uint8Array {
+  const length = new Uint8Array(4)
+  new DataView(length.buffer).setUint32(0, proto.length, false)
+  const result = new Uint8Array(4 + proto.length)
+  result.set(length, 0)
+  result.set(proto, 4)
+  return result
+}
+
+const message1 = MyProto.encode({ field: 'value1' }).finish()
+const message2 = MyProto.encode({ field: 'value2' }).finish()
+
+await stream.append(encodeMessage(message1))
+await stream.append(encodeMessage(message2))
+```
+
+## Common content types
+
+<CardGroup cols={2}>
+
+<Card title="application/json" icon="brackets-curly">
+**Use for**: Structured events, API responses, state changes  
+**Framing**: Automatic message boundaries  
+**Example**: `{"user": "alice", "action": "login"}`
+</Card>
+
+<Card title="application/x-ndjson" icon="align-left">
+**Use for**: Streaming logs, bulk data export  
+**Framing**: Manual newlines  
+**Example**: `{"level":"info"}\n{"level":"error"}\n`
+</Card>
+
+<Card title="text/plain" icon="file-lines">
+**Use for**: Log files, plain text data  
+**Framing**: Manual delimiters  
+**Example**: `2024-01-15 10:30:00 INFO Started\n`
+</Card>
+
+<Card title="application/octet-stream" icon="binary">
+**Use for**: Binary data, custom formats  
+**Framing**: Length-prefixed or custom  
+**Example**: Binary protocol buffers with length headers
+</Card>
+
+</CardGroup>
+
+## Choosing a content type
+
+<Steps>
+
+### Use JSON mode for structured data
+
+If you're sending structured events, objects, or API responses, use `application/json`:
+
+```typescript
+// ✅ Good: Automatic message boundaries
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/json'
+})
+
+await stream.append(JSON.stringify({ event: 'created' }))
+await stream.append(JSON.stringify({ event: 'updated' }))
+```
+
+### Use NDJSON for line-oriented data
+
+For logs or data where newlines naturally separate records:
+
+```typescript
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/logs',
+  contentType: 'application/x-ndjson'
+})
+
+await stream.append(JSON.stringify({ timestamp: Date.now() }) + '\n')
+```
+
+### Use binary for custom protocols
+
+For maximum efficiency or existing binary protocols:
+
+```typescript
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/telemetry',
+  contentType: 'application/octet-stream'
+})
+
+// Your custom framing protocol
+await stream.append(encodeCustomFormat(data))
+```
+
+</Steps>
+
+## Best practices
+
+<Tip>
+**JSON mode is recommended** for most use cases. It provides automatic message boundary preservation, making it easier to work with structured data without implementing custom framing.
+</Tip>
+
+<Warning>
+**Never mix content types** on the same stream. Appends must match the stream's configured content type, or the server returns `409 Conflict`.
+</Warning>
+
+```typescript
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/events',
+  contentType: 'application/json'
+})
+
+// ✅ Good: Matches stream content type
+await stream.append(JSON.stringify({ event: 'created' }))
+
+// ❌ Wrong: Different content type
+await stream.append('plain text')  // 409 Conflict
+```
+
+## Reading chunked data
+
+Servers may return data in chunks for performance. The client libraries handle reassembly automatically:
+
+<CodeGroup>
+
+```typescript TypeScript
+const response = await stream.stream<{ event: string }>()
+
+// Automatic chunk handling with backpressure
+response.subscribeJson(async (batch) => {
+  // batch.items contains complete messages
+  // even if they arrived across multiple HTTP chunks
+  for (const item of batch.items) {
+    console.log(item.event)
+  }
+})
+```
+
+```python Python
+response = stream.stream()
+
+# Automatic chunk handling
+for batch in response.json_stream():
+    # batch.items contains complete messages
+    # even if they arrived across multiple HTTP chunks
+    for item in batch.items:
+        print(item['event'])
+```
+
+</CodeGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="Live Modes" icon="signal-stream" href="/concepts/live-modes">
+Learn about real-time streaming with long-polling and SSE
+</Card>
+
+<Card title="Idempotent Producers" icon="shield-check" href="/concepts/idempotent-producers">
+Implement exactly-once write semantics
+</Card>
+
+<Card title="Caching and Fanout" icon="network-wired" href="/concepts/caching-and-fanout">
+Optimize performance with CDN caching
+</Card>
+
+</CardGroup>

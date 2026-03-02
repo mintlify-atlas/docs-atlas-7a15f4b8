@@ -1,80 +1,544 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Get up and running with Durable Streams in 5 minutes
 ---
 
-## Get started in three steps
+# Quick Start
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will help you get started with Durable Streams in just a few minutes. You'll learn how to create a stream, write data to it, and read it back.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  This quick start uses the TypeScript client. For other languages, see the [Installation](/installation) guide.
 </Note>
+
+## Prerequisites
+
+You'll need:
+- Node.js 18 or later
+- A Durable Streams server (we'll start one locally)
+
+## Step 1: Start the Local Server
+
+The easiest way to get started is to run the local development server:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/durable-streams/durable-streams.git
+    cd durable-streams
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Build the packages">
+    ```bash
+    pnpm build
+    ```
+  </Step>
+
+  <Step title="Start the development server">
+    ```bash
+    pnpm start:dev
+    ```
+
+    The server will start on `http://localhost:4437`
+  </Step>
+</Steps>
+
+<Info>
+  For production deployments, download the Caddy-based server binary from [GitHub releases](https://github.com/durable-streams/durable-streams/releases). Available for macOS, Linux, and Windows.
+</Info>
+
+## Step 2: Install the Client Library
+
+In a new terminal, create a new project and install the client library:
+
+```bash
+mkdir my-durable-streams-app
+cd my-durable-streams-app
+npm init -y
+npm install @durable-streams/client
+```
+
+## Step 3: Create Your First Stream
+
+Create a file called `index.js`:
+
+```javascript index.js
+import { DurableStream } from "@durable-streams/client"
+
+const stream = await DurableStream.create({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+  contentType: "application/json",
+})
+
+console.log("Stream created at:", stream.url)
+```
+
+Run it:
+
+```bash
+node index.js
+```
+
+You should see:
+
+```
+Stream created at: http://localhost:4437/v1/stream/my-first-stream
+```
+
+<Check>
+  Congratulations! You've created your first durable stream.
+</Check>
+
+## Step 4: Write Data to the Stream
+
+Now let's write some data to the stream. Update `index.js`:
+
+<CodeGroup>
+
+```javascript Simple Append
+import { DurableStream } from "@durable-streams/client"
+
+const stream = await DurableStream.create({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+  contentType: "application/json",
+})
+
+// Append individual messages
+await stream.append(JSON.stringify({ event: "user.created", userId: "123" }))
+await stream.append(JSON.stringify({ event: "user.updated", userId: "123" }))
+await stream.append(JSON.stringify({ event: "user.deleted", userId: "123" }))
+
+console.log("Data written to stream")
+```
+
+```javascript Idempotent Producer
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+const stream = await DurableStream.create({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+  contentType: "application/json",
+})
+
+// Create an idempotent producer for reliable writes
+const producer = new IdempotentProducer(stream, "my-producer-1", {
+  autoClaim: true,
+  onError: (err) => console.error("Batch failed:", err),
+})
+
+// Fire-and-forget writes - batched automatically
+producer.append(JSON.stringify({ event: "user.created", userId: "123" }))
+producer.append(JSON.stringify({ event: "user.updated", userId: "123" }))
+producer.append(JSON.stringify({ event: "user.deleted", userId: "123" }))
+
+// Ensure all messages are delivered
+await producer.flush()
+await producer.close()
+
+console.log("Data written to stream")
+```
+
+</CodeGroup>
+
+<Tip>
+  Use `IdempotentProducer` for production applications. It provides:
+  - Exactly-once delivery semantics
+  - Automatic batching for high throughput
+  - Network resilience (safe to retry)
+</Tip>
+
+## Step 5: Read Data from the Stream
+
+Now let's read the data back. Create a new file called `read.js`:
+
+<CodeGroup>
+
+```javascript Read All
+import { DurableStream } from "@durable-streams/client"
+
+const stream = new DurableStream({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+})
+
+// Read all data (catch-up mode)
+const res = await stream.stream({ live: false })
+const items = await res.json()
+
+console.log("Items:", items)
+// Output: [
+//   { event: 'user.created', userId: '123' },
+//   { event: 'user.updated', userId: '123' },
+//   { event: 'user.deleted', userId: '123' }
+// ]
+```
+
+```javascript Stream Live
+import { DurableStream } from "@durable-streams/client"
+
+const stream = new DurableStream({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+})
+
+// Subscribe to live updates
+const res = await stream.stream({ live: "auto" })
+
+res.subscribeJson(async (batch) => {
+  console.log(`Received ${batch.items.length} items:`, batch.items)
+  // Save offset for resumption
+  localStorage.setItem("lastOffset", batch.offset)
+})
+```
+
+```javascript Resume from Offset
+import { DurableStream } from "@durable-streams/client"
+
+const stream = new DurableStream({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+})
+
+// Get last saved offset
+const lastOffset = localStorage.getItem("lastOffset") || "-1"
+
+// Resume from saved offset
+const res = await stream.stream({ 
+  offset: lastOffset, 
+  live: "auto" 
+})
+
+res.subscribeJson(async (batch) => {
+  for (const item of batch.items) {
+    console.log("Item:", item)
+  }
+  localStorage.setItem("lastOffset", batch.offset)
+})
+```
+
+</CodeGroup>
+
+Run it:
+
+```bash
+node read.js
+```
+
+## Step 6: Try Live Streaming
+
+To see the real power of Durable Streams, let's try live streaming:
+
+1. **Terminal 1**: Start reading (this will wait for new data)
+
+```javascript live-reader.js
+import { DurableStream } from "@durable-streams/client"
+
+const stream = new DurableStream({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+})
+
+const res = await stream.stream({ live: "auto" })
+
+res.subscribeJson(async (batch) => {
+  for (const item of batch.items) {
+    console.log("Received:", item)
+  }
+})
+
+console.log("Waiting for new data...")
+```
+
+```bash
+node live-reader.js
+```
+
+2. **Terminal 2**: Write new data
+
+```javascript writer.js
+import { DurableStream } from "@durable-streams/client"
+
+const stream = new DurableStream({
+  url: "http://localhost:4437/v1/stream/my-first-stream",
+})
+
+// Write messages every second
+let count = 0
+setInterval(async () => {
+  count++
+  await stream.append(JSON.stringify({ 
+    event: "tick", 
+    count,
+    timestamp: new Date().toISOString() 
+  }))
+  console.log(`Sent message ${count}`)
+}, 1000)
+```
+
+```bash
+node writer.js
+```
+
+You should see the messages appear in Terminal 1 in real-time!
+
+<Check>
+  You now have a working live streaming setup!
+</Check>
+
+## Using the CLI
+
+For quick testing and exploration, you can use the CLI:
+
+<Steps>
+  <Step title="Install the CLI globally">
+    ```bash
+    npm install -g @durable-streams/cli
+    ```
+
+    Or run directly with npx:
+    ```bash
+    npx @durable-streams/cli
+    ```
+  </Step>
+
+  <Step title="Create a stream">
+    ```bash
+    STREAM_URL=http://localhost:4437 \
+    durable-stream create test-stream
+    ```
+  </Step>
+
+  <Step title="Write data">
+    ```bash
+    # Write directly
+    durable-stream write test-stream "Hello, world!"
+
+    # Pipe from stdin
+    echo '{"message": "hello"}' | durable-stream write test-stream --json
+    ```
+  </Step>
+
+  <Step title="Read data">
+    ```bash
+    durable-stream read test-stream
+    ```
+  </Step>
+</Steps>
+
+## Complete Example: AI Token Streaming
+
+Here's a real-world example showing how to stream LLM tokens with resume capability:
+
+<CodeGroup>
+
+```typescript Server (Writer)
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+import OpenAI from "openai"
+
+const openai = new OpenAI()
+
+// Create stream for this generation
+const generationId = crypto.randomUUID()
+const stream = await DurableStream.create({
+  url: `http://localhost:4437/v1/stream/generation/${generationId}`,
+  contentType: "text/plain",
+})
+
+// Use idempotent producer for reliable token delivery
+const producer = new IdempotentProducer(stream, generationId, {
+  autoClaim: true,
+  lingerMs: 10, // Send batches every 10ms for low latency
+  onError: (err) => console.error("Failed to send tokens:", err),
+})
+
+// Stream tokens from OpenAI
+const completion = await openai.chat.completions.create({
+  model: "gpt-4",
+  messages: [{ role: "user", content: "Tell me a story" }],
+  stream: true,
+})
+
+for await (const chunk of completion) {
+  const token = chunk.choices[0]?.delta?.content
+  if (token) {
+    producer.append(token)
+  }
+}
+
+// Close the stream when done
+await producer.close()
+
+console.log("Generation complete. Stream URL:", stream.url)
+```
+
+```typescript Client (Reader)
+import { DurableStream } from "@durable-streams/client"
+
+// Get generation ID from URL or API
+const generationId = "..."
+
+const stream = new DurableStream({
+  url: `http://localhost:4437/v1/stream/generation/${generationId}`,
+})
+
+// Get last seen offset (from localStorage, database, etc.)
+const lastOffset = localStorage.getItem(`gen-${generationId}`) || "-1"
+
+// Resume from saved offset - refresh-safe!
+const res = await stream.stream({ 
+  offset: lastOffset, 
+  live: "auto" 
+})
+
+const outputElement = document.getElementById("output")
+
+res.subscribe((chunk) => {
+  // Render tokens
+  outputElement.textContent += chunk.data
+  
+  // Save offset for resume
+  localStorage.setItem(`gen-${generationId}`, chunk.offset)
+})
+
+// If stream is closed (generation complete), show done indicator
+res.subscribe((chunk) => {
+  if (chunk.streamClosed) {
+    console.log("Generation complete")
+  }
+})
+```
+
+</CodeGroup>
+
+<Info>
+  **What this gives you:**
+  - Tab suspended? User comes back and catches up from saved offset
+  - Page refresh? Continues from last token, not from the beginning
+  - Share the generation? Multiple viewers watch the same stream in real-time
+  - Switch devices? Start on mobile, continue on desktop
+</Info>
+
+## Testing with the Test UI
+
+The repository includes a visual web interface for testing:
+
+```bash
+# Terminal 1: Start the server (if not already running)
+pnpm start:dev
+
+# Terminal 2: Start the Test UI
+cd examples/test-ui
+pnpm dev
+```
+
+Open `http://localhost:3000` to:
+- Create and manage streams
+- Write messages with keyboard shortcuts
+- Monitor real-time stream updates
+- View the stream registry
+- Inspect stream metadata
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation Guide" icon="download" href="/installation">
+    Install client libraries for Python, Go, and other languages
+  </Card>
+  <Card title="Protocol Specification" icon="file-code" href="https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md">
+    Learn about the complete protocol
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/client-typescript">
+    Explore the full API documentation
+  </Card>
+  <Card title="Examples" icon="code" href="https://github.com/durable-streams/durable-streams/tree/main/examples">
+    See more example applications
+  </Card>
+</CardGroup>
+
+## Common Patterns
+
+<AccordionGroup>
+  <Accordion title="How do I handle authentication?">
+    Pass authentication headers to the stream handle:
+
+    ```typescript
+    const stream = new DurableStream({
+      url: "https://your-server.com/v1/stream/my-stream",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    ```
+
+    Headers are sent with every request.
+  </Accordion>
+
+  <Accordion title="How do I batch multiple writes?">
+    Use `IdempotentProducer` which batches automatically:
+
+    ```typescript
+    const producer = new IdempotentProducer(stream, "my-producer", {
+      lingerMs: 5,          // Wait 5ms before sending
+      maxBatchBytes: 65536, // Or send when batch reaches 64KB
+    })
+
+    // These get batched into fewer HTTP requests
+    for (const event of events) {
+      producer.append(JSON.stringify(event))
+    }
+
+    await producer.flush()
+    ```
+  </Accordion>
+
+  <Accordion title="How do I implement retry logic?">
+    The client includes automatic retry with exponential backoff:
+
+    ```typescript
+    const stream = new DurableStream({
+      url: "...",
+      backoffOptions: {
+        maxRetries: 5,
+        initialDelay: 100,
+        maxDelay: 10000,
+      },
+    })
+    ```
+
+    `IdempotentProducer` is safe to retry - the server deduplicates.
+  </Accordion>
+
+  <Accordion title="Can I use this in React/Vue/Svelte?">
+    Yes! Here's a React example:
+
+    ```typescript
+    import { useEffect, useState } from "react"
+    import { DurableStream } from "@durable-streams/client"
+
+    function StreamComponent() {
+      const [items, setItems] = useState([])
+
+      useEffect(() => {
+        const stream = new DurableStream({ url: "..." })
+        
+        const start = async () => {
+          const res = await stream.stream({ live: "auto" })
+          res.subscribeJson(async (batch) => {
+            setItems(prev => [...prev, ...batch.items])
+          })
+        }
+
+        start()
+      }, [])
+
+      return (
+        <ul>
+          {items.map((item, i) => <li key={i}>{JSON.stringify(item)}</li>)}
+        </ul>
+      )
+    }
+    ```
+  </Accordion>
+</AccordionGroup>

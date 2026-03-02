@@ -1,0 +1,519 @@
+---
+title: "Ruby Client"
+description: "API reference for the durable_streams Ruby gem"
+---
+
+# Ruby Client
+
+The official Ruby client for Durable Streams protocol with enumerable streaming.
+
+## Installation
+
+Add to your `Gemfile`:
+
+```ruby
+gem 'durable_streams'
+```
+
+Or install directly:
+
+```bash
+gem install durable_streams
+```
+
+Requires Ruby 3.0 or later
+
+## Quick Start
+
+```ruby
+require 'durable_streams'
+
+# Create a client
+client = DurableStreams::Client.new(base_url: 'https://streams.example.com')
+stream = client.stream('/my-stream')
+
+# Create the stream
+stream.create(content_type: 'application/json')
+
+# Append data
+stream.append({message: 'hello'}.to_json)
+
+# Read data
+stream.read(offset: '-1', live: :long_poll).each do |batch|
+  batch.items.each do |item|
+    puts "Item: #{item}"
+  end
+  # Save checkpoint
+  save_offset(batch.offset)
+end
+```
+
+## Core APIs
+
+### Client
+
+<ParamField path="Client.new" type="method">
+  Create a new client
+
+  <ParamField path="base_url" type="String | nil">
+    Base URL for relative paths
+  </ParamField>
+  <ParamField path="headers" type="Hash">
+    Default headers (values can be strings or callables)
+  </ParamField>
+  <ParamField path="timeout" type="Numeric" default="30">
+    Request timeout in seconds
+  </ParamField>
+  <ParamField path="retry_policy" type="RetryPolicy | nil">
+    Custom retry configuration
+  </ParamField>
+
+  Returns: `Client`
+</ParamField>
+
+**Example:**
+
+```ruby
+client = DurableStreams::Client.new(
+  base_url: 'https://streams.example.com',
+  headers: {
+    'Authorization' => 'Bearer token123',
+    'X-Request-ID' => -> { SecureRandom.uuid }
+  },
+  timeout: 60
+)
+```
+
+<ParamField path="stream" type="method">
+  Get a stream handle
+
+  <ParamField path="url" type="String" required>
+    Stream URL or path
+  </ParamField>
+  <ParamField path="options" type="Hash">
+    Additional options
+  </ParamField>
+
+  Returns: `Stream`
+</ParamField>
+
+<ParamField path="Client.open" type="class method">
+  Open a client with block form for automatic cleanup
+
+  <ParamField path="options" type="Hash" required>
+    Client options
+  </ParamField>
+  <ParamField path="block" type="Block" required>
+    Block to execute
+  </ParamField>
+
+  Returns: Block's return value
+</ParamField>
+
+**Example:**
+
+```ruby
+DurableStreams::Client.open(base_url: 'https://...') do |client|
+  stream = client.stream('/events')
+  # ...
+end # auto-closes
+```
+
+### Stream
+
+Handle to a durable stream for read/write operations.
+
+#### Static Factory Methods
+
+<ParamField path="Stream.create" type="class method">
+  Create a new stream and return a handle
+
+  <ParamField path="url" type="String" required>
+    Stream URL or path
+  </ParamField>
+  <ParamField path="content_type" type="String" required>
+    Content type (e.g., `"application/json"`)
+  </ParamField>
+  <ParamField path="context" type="Context">
+    Client context
+  </ParamField>
+  <ParamField path="ttl_seconds" type="Integer | nil">
+    Time-to-live in seconds
+  </ParamField>
+  <ParamField path="expires_at" type="String | nil">
+    Absolute expiry time (ISO8601)
+  </ParamField>
+  <ParamField path="closed" type="Boolean" default="false">
+    Create in closed state
+  </ParamField>
+
+  Returns: `Stream`
+
+  Raises: `StreamExistsError` if stream already exists
+</ParamField>
+
+<ParamField path="Stream.connect" type="class method">
+  Connect to an existing stream (validates via HEAD)
+
+  <ParamField path="url" type="String" required>
+    Stream URL or path
+  </ParamField>
+  <ParamField path="context" type="Context">
+    Client context
+  </ParamField>
+
+  Returns: `Stream`
+
+  Raises: `StreamNotFoundError` if stream doesn't exist
+</ParamField>
+
+**Example:**
+
+```ruby
+stream = DurableStreams::Stream.create(
+  'https://streams.example.com/events',
+  content_type: 'application/json',
+  ttl_seconds: 86400  # 24 hours
+)
+```
+
+#### Write Operations
+
+<ParamField path="append" type="method">
+  Append data to the stream
+
+  <ParamField path="data" type="String | Hash | Array" required>
+    Data to append (for JSON streams, pass Hash/Array or pre-encoded string)
+  </ParamField>
+  <ParamField path="seq" type="String | nil">
+    Writer coordination sequence
+  </ParamField>
+
+  Returns: `{next_offset: String}`
+
+  Raises: `StreamClosedError`, `SeqConflictError`, `DurableStreamError`
+</ParamField>
+
+**Example:**
+
+```ruby
+# JSON stream - pass hash (auto-encoded)
+result = stream.append({message: 'hello'})
+puts "Offset: #{result[:next_offset]}"
+
+# Or pre-encode JSON
+result = stream.append('{"message":"hello"}')
+
+# Byte stream
+result = stream.append('raw bytes')
+
+# With sequence
+result = stream.append({message: 'world'}, seq: 'seq-001')
+```
+
+<ParamField path="close_stream" type="method">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="data" type="String | Hash | nil">
+    Optional final message
+  </ParamField>
+
+  Returns: `{final_offset: String}`
+
+  Raises: `StreamClosedError` if called with data on already-closed stream
+</ParamField>
+
+<ParamField path="delete" type="method">
+  Delete this stream
+
+  Raises: `StreamNotFoundError` if stream doesn't exist
+</ParamField>
+
+#### Read Operations
+
+<ParamField path="read" type="method">
+  Read from the stream as an Enumerable
+
+  <ParamField path="offset" type="String" default="'-1'">
+    Starting offset
+  </ParamField>
+  <ParamField path="live" type=":off | :long_poll | :sse" default=":off">
+    Live mode
+  </ParamField>
+  <ParamField path="cursor" type="String | nil">
+    Stream cursor for CDN collapsing
+  </ParamField>
+
+  Returns: `Enumerable` (yields batches)
+</ParamField>
+
+**Example:**
+
+```ruby
+stream.read(offset: last_offset, live: :long_poll).each do |batch|
+  # For JSON streams
+  if batch.respond_to?(:items)
+    batch.items.each do |item|
+      puts "Item: #{item.inspect}"
+    end
+  else
+    # For byte streams
+    puts "Got #{batch.data.bytesize} bytes"
+  end
+
+  # Save checkpoint
+  save_checkpoint(batch.offset)
+end
+```
+
+<ParamField path="read_json" type="method">
+  Read JSON items as an Enumerable
+
+  <ParamField path="offset" type="String" default="'-1'">
+    Starting offset
+  </ParamField>
+  <ParamField path="live" type=":off | :long_poll | :sse" default=":off">
+    Live mode
+  </ParamField>
+
+  Returns: `Enumerable` (yields individual items, not batches)
+</ParamField>
+
+**Example:**
+
+```ruby
+stream.read_json(live: :long_poll).each do |item|
+  puts "Event #{item['id']}: #{item['type']}"
+  process_event(item)
+end
+```
+
+<ParamField path="head" type="method">
+  Get stream metadata via HEAD request
+
+  Returns: `{content_type: String, offset: String, stream_closed: Boolean}`
+
+  Raises: `StreamNotFoundError` if stream doesn't exist
+</ParamField>
+
+### Producer
+
+Idempotent producer for exactly-once writes.
+
+```ruby
+producer = DurableStreams::Producer.new(
+  stream: stream,
+  producer_id: 'order-service-1',
+  epoch: 0,
+  auto_claim: true,
+  max_batch_bytes: 1024 * 1024,
+  linger_ms: 5
+)
+
+# Fire-and-forget writes
+producer.append({orderId: '123'}.to_json)
+producer.append({orderId: '456'}.to_json)
+
+# Ensure delivery
+producer.flush
+producer.close
+```
+
+<ParamField path="Producer.new" type="method">
+  Create an idempotent producer
+
+  <ParamField path="stream" type="Stream" required>
+    Target stream
+  </ParamField>
+  <ParamField path="producer_id" type="String" required>
+    Stable identifier
+  </ParamField>
+  <ParamField path="epoch" type="Integer" default="0">
+    Starting epoch
+  </ParamField>
+  <ParamField path="auto_claim" type="Boolean" default="false">
+    Auto-retry with epoch+1 on 403
+  </ParamField>
+  <ParamField path="max_batch_bytes" type="Integer" default="1048576">
+    Max batch size (1MB)
+  </ParamField>
+  <ParamField path="linger_ms" type="Integer" default="5">
+    Max wait before sending batch
+  </ParamField>
+  <ParamField path="on_error" type="Proc | nil">
+    Error callback
+  </ParamField>
+
+  Returns: `Producer`
+</ParamField>
+
+<ParamField path="append" type="method">
+  Fire-and-forget append (returns immediately)
+
+  <ParamField path="data" type="String" required>
+    Data to append (for JSON, pass pre-encoded JSON)
+  </ParamField>
+</ParamField>
+
+<ParamField path="flush" type="method">
+  Send pending batch and wait for all in-flight batches
+
+  Raises: `ProducerError` on failure
+</ParamField>
+
+<ParamField path="close" type="method">
+  Flush and close (no stream close)
+</ParamField>
+
+<ParamField path="close_stream" type="method">
+  Close the stream with producer headers (idempotent)
+
+  <ParamField path="data" type="String | nil">
+    Optional final message
+  </ParamField>
+
+  Returns: `{final_offset: String}`
+</ParamField>
+
+## Types
+
+### Offset
+
+```ruby
+# String type - use "-1" for start of stream
+offset = "-1"
+offset = "123_456"
+```
+
+### LiveMode
+
+```ruby
+# Symbols
+:off        # Catch-up only
+:long_poll  # Long-polling
+:sse        # Server-Sent Events
+```
+
+## Error Handling
+
+```ruby
+require 'durable_streams'
+
+begin
+  stream.append(data)
+rescue DurableStreams::StreamClosedError => e
+  puts "Stream is closed: #{e.url}"
+rescue DurableStreams::SeqConflictError
+  puts "Sequence conflict"
+rescue DurableStreams::StreamNotFoundError => e
+  puts "Stream not found: #{e.url}"
+rescue DurableStreams::DurableStreamError => e
+  puts "Error #{e.status_code}: #{e.message}"
+end
+```
+
+### Error Hierarchy
+
+- `DurableStreamError` - Base exception
+  - `StreamNotFoundError` - 404
+  - `StreamExistsError` - 409 on create
+  - `StreamClosedError` - 409 with Stream-Closed header
+  - `SeqConflictError` - 409 sequence conflict
+  - `StaleEpochError` - 403 for producers
+  - `UnauthorizedError` - 401
+  - `ForbiddenError` - 403
+  - `RateLimitedError` - 429
+
+## Advanced Features
+
+### Block Form
+
+```ruby
+DurableStreams::Client.open(base_url: 'https://...') do |client|
+  stream = client.stream('/events')
+  stream.create(content_type: 'application/json')
+
+  stream.append({event: 'test'})
+end # auto-closes client
+```
+
+### Dynamic Headers
+
+```ruby
+client = DurableStreams::Client.new(
+  base_url: 'https://...',
+  headers: {
+    'Authorization' => -> { "Bearer #{fetch_token}" },
+    'X-Request-ID' => -> { SecureRandom.uuid }
+  }
+)
+```
+
+### Enumerable Chaining
+
+```ruby
+stream.read_json(live: :long_poll)
+  .lazy
+  .select { |item| item['type'] == 'order.created' }
+  .map { |item| process_order(item) }
+  .each { |result| save_result(result) }
+```
+
+### Rails Integration
+
+```ruby
+# config/initializers/durable_streams.rb
+RAILS_DURABLE_STREAMS = DurableStreams::Client.new(
+  base_url: ENV['STREAMS_URL'],
+  headers: { 'Authorization' => "Bearer #{ENV['STREAMS_TOKEN']}" }
+)
+
+# In your model/service
+class EventPublisher
+  def self.publish(event)
+    stream = RAILS_DURABLE_STREAMS.stream('/events')
+    stream.append(event.to_json)
+  end
+end
+```
+
+### Thread Safety
+
+```ruby
+# Client is thread-safe
+client = DurableStreams::Client.new(base_url: 'https://...')
+
+threads = 10.times.map do |i|
+  Thread.new do
+    stream = client.stream("/stream-#{i}")
+    stream.create(content_type: 'application/json')
+    stream.append({index: i})
+  end
+end
+
+threads.each(&:join)
+```
+
+### Testing with RSpec
+
+```ruby
+RSpec.describe EventService do
+  let(:client) { DurableStreams::Client.new(base_url: test_server_url) }
+  let(:stream) { client.stream('/test-stream') }
+
+  before do
+    stream.create(content_type: 'application/json')
+  end
+
+  it 'publishes events' do
+    stream.append({event: 'test'})
+
+    items = stream.read.first.items
+    expect(items).to include(hash_including('event' => 'test'))
+  end
+end
+```
+
+## Source Code
+
+Source: [packages/client-rb/lib/durable_streams/](/source/packages/client-rb/lib/durable_streams/client.rb)

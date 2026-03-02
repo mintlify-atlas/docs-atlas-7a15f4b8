@@ -1,0 +1,153 @@
+---
+title: Community Implementations
+description: External Durable Streams client and server implementations built by the community.
+---
+
+The Durable Streams protocol is designed to support implementations in any language or platform. While the monorepo includes official client libraries for TypeScript, Python, Go, Elixir, .NET, Swift, PHP, Java, Rust, and Ruby, the community has also built additional implementations.
+
+## Community Client Libraries
+
+### Go
+
+**[ahimsalabs/durable-streams-go](https://github.com/ahimsalabs/durable-streams-go)**
+
+An alternative Go client and server implementation.
+
+### Java
+
+**[Clickin/durable-streams-java](https://github.com/Clickin/durable-streams-java)**
+
+An alternative Java client with framework adapters.
+
+## Building Your Own Implementation
+
+The protocol is designed to support implementations in any language or platform. A conforming implementation requires:
+
+### For Server Implementations
+
+1. **HTTP API** - Implement the protocol operations (PUT, POST, GET, DELETE, HEAD) as defined in the [Protocol Specification](https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md)
+2. **Durable storage** - Persist stream data with offset tracking (in-memory, file-based, database, object storage, etc.)
+3. **Offset management** - Generate opaque, lexicographically sortable offset tokens
+
+### For Client Implementations
+
+Client implementations need only support:
+
+- Standard HTTP requests (PUT, POST, GET, DELETE, HEAD)
+- Offset tracking for resumability
+- Optional: Live streaming modes (long-poll, SSE)
+- Optional: Idempotent producer protocol for exactly-once writes
+
+## Conformance Testing
+
+The monorepo includes comprehensive conformance test suites to verify your implementation:
+
+### Server Conformance Tests
+
+Test that your server correctly implements the Durable Streams protocol:
+
+```bash
+# Run tests once (for CI)
+npx @durable-streams/server-conformance-tests --run http://localhost:4437
+
+# Watch mode - reruns tests when source files change (for development)
+npx @durable-streams/server-conformance-tests --watch src http://localhost:4437
+```
+
+Or programmatically:
+
+```typescript
+import { runConformanceTests } from "@durable-streams/server-conformance-tests"
+
+runConformanceTests({
+  baseUrl: "http://localhost:4437",
+})
+```
+
+The suite includes 124 tests covering:
+- Stream creation and deletion
+- Data append operations
+- Offset-based reads
+- Live streaming modes (long-poll, SSE)
+- Idempotent producer protocol
+- JSON mode handling
+- Error conditions and edge cases
+
+### Client Conformance Tests
+
+Test that your client correctly interacts with the protocol:
+
+```bash
+# Run client conformance tests
+pnpm test:run -- --client your-client-name
+```
+
+The suite includes 221 tests covering:
+- Basic read/write operations
+- Offset management and resumability
+- Live streaming modes
+- Idempotent producer behavior
+- JSON mode handling
+- Error handling
+- Binary and text content types
+
+## Performance Benchmarking
+
+Measure your implementation's performance:
+
+```typescript
+import { runBenchmarks } from "@durable-streams/benchmarks"
+
+runBenchmarks({
+  baseUrl: "http://localhost:4437",
+  environment: "local",
+})
+```
+
+## Contributing Your Implementation
+
+We welcome community implementations! If you've built a Durable Streams client or server:
+
+1. Ensure it passes the conformance test suite
+2. Document installation and usage in your repository
+3. Open a pull request to add your implementation to this page
+
+Include:
+- Language/platform name
+- Repository link
+- Brief description of unique features or design choices
+- Conformance test results (if applicable)
+
+## Reference Implementations
+
+The official monorepo contains reference implementations that can serve as examples:
+
+### Client Libraries
+
+| Language   | Package                     | Location                            |
+| ---------- | --------------------------- | ----------------------------------- |
+| TypeScript | `@durable-streams/client`   | `packages/client`                   |
+| Python     | `durable-streams-client-py` | `packages/client-py`                |
+| Go         | `durable-streams-client-go` | `packages/client-go`                |
+| Elixir     | `durable_streams`           | `packages/client-elixir`            |
+| .NET       | `DurableStreams.Client`     | `packages/client-dotnet`            |
+| Swift      | `DurableStreamsClient`      | `packages/client-swift`             |
+| PHP        | `durable-streams/client`    | `packages/client-php`               |
+| Java       | `durable-streams-client`    | `packages/client-java`              |
+| Rust       | `durable-streams-client`    | `packages/client-rust`              |
+| Ruby       | `durable-streams-client`    | `packages/client-rb`                |
+
+### Server Implementations
+
+- **Node.js Reference Server** - `@durable-streams/server` (development only)
+- **Caddy Plugin** - Production-ready server implementation in Go
+
+All reference implementations pass the full conformance test suite and can be used as a guide for building your own.
+
+## Resources
+
+- [Protocol Specification](https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md)
+- [Server Conformance Tests Package](https://www.npmjs.com/package/@durable-streams/server-conformance-tests)
+- [Client Conformance Tests Package](https://www.npmjs.com/package/@durable-streams/client-conformance-tests)
+- [Benchmarks Package](https://www.npmjs.com/package/@durable-streams/benchmarks)
+- [Contributing Guide](/resources/contributing)

@@ -1,0 +1,427 @@
+---
+title: Streams and Offsets
+description: Understanding how offset-based positioning enables resumable, replayable stream reads
+---
+
+Offsets are the foundation of Durable Streams' resumability. They allow you to pick up exactly where you left off after a disconnect, refresh, or app restart.
+
+## What is an offset?
+
+An offset is an opaque token that identifies a specific position within a stream. Think of it like a bookmark—you can use it to resume reading from that exact point.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+// Start reading from the beginning
+const response = await stream({
+  url: 'https://streams.example.com/my-stream',
+  offset: '-1'  // Special value: start of stream
+})
+
+// Get data
+const data = await response.json()
+
+// Save the offset for later
+const nextOffset = response.offset
+localStorage.setItem('lastOffset', nextOffset)
+
+// Later, resume from where we left off
+const resumed = await stream({
+  url: 'https://streams.example.com/my-stream',
+  offset: localStorage.getItem('lastOffset')
+})
+```
+
+```python Python
+from durable_streams import stream
+
+# Start reading from the beginning
+response = stream(
+    url='https://streams.example.com/my-stream',
+    offset='-1'  # Special value: start of stream
+)
+
+# Get data
+data = response.json()
+
+# Save the offset for later
+next_offset = response.offset
+save_to_database('lastOffset', next_offset)
+
+# Later, resume from where we left off
+resumed = stream(
+    url='https://streams.example.com/my-stream',
+    offset=load_from_database('lastOffset')
+)
+```
+
+</CodeGroup>
+
+## Offset properties
+
+Offsets have five key properties:
+
+<Steps>
+
+### Opaque
+
+You must **not** interpret the offset structure or meaning. Always use offsets as-is, exactly as returned by the server.
+
+```typescript
+// ✅ Correct: Use offset as-is
+const offset = response.offset
+await stream({ url, offset })
+
+// ❌ Wrong: Don't parse or manipulate offsets
+const parts = offset.split('_')
+const modified = `${parts[0]}_${Number(parts[1]) + 1}`
+```
+
+### Lexicographically sortable
+
+For any two valid offsets from the same stream, lexicographic comparison determines their relative position.
+
+```typescript
+const offset1 = '100_1234'
+const offset2 = '100_5678'
+
+// You can compare offsets to determine order
+if (offset1 < offset2) {
+  console.log('offset1 comes before offset2')
+}
+```
+
+### Persistent
+
+Offsets remain valid for the lifetime of the stream (until deletion or expiration).
+
+<Note>
+You can save offsets to a database, localStorage, or any persistent storage and use them days or weeks later.
+</Note>
+
+### Unique
+
+Each offset identifies exactly one position in the stream. No two positions may share the same offset.
+
+### Strictly increasing
+
+Offsets assigned to appended data must be lexicographically greater than all previously assigned offsets.
+
+</Steps>
+
+## Special offset values
+
+The protocol defines two special sentinel values:
+
+### `-1` (Stream beginning)
+
+The offset `-1` represents the beginning of the stream. Use this to read from the start.
+
+<CodeGroup>
+
+```typescript TypeScript
+// These are equivalent:
+const res1 = await stream({ url })  // offset defaults to '-1'
+const res2 = await stream({ url, offset: '-1' })  // explicit
+```
+
+```python Python
+# These are equivalent:
+res1 = stream(url=url)  # offset defaults to '-1'
+res2 = stream(url=url, offset='-1')  # explicit
+```
+
+</CodeGroup>
+
+### `now` (Current tail)
+
+The offset `now` allows you to skip all existing data and begin reading from the current tail position. This is useful for applications that only care about future data.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+// Skip to the current end of the stream
+const response = await stream({
+  url: 'https://streams.example.com/notifications',
+  offset: 'now',
+  live: true
+})
+
+// Only receive new notifications from this point forward
+response.subscribeJson(async (batch) => {
+  for (const notification of batch.items) {
+    showNotification(notification)
+  }
+})
+```
+
+```python Python
+from durable_streams import stream
+
+# Skip to the current end of the stream
+response = stream(
+    url='https://streams.example.com/notifications',
+    offset='now',
+    live=True
+)
+
+# Only receive new notifications from this point forward
+for notification in response.json_stream():
+    show_notification(notification)
+```
+
+</CodeGroup>
+
+<Info>
+The `now` offset is particularly useful for:
+- Presence tracking (only care about future joins/leaves)
+- Live monitoring (skip historical data)
+- Late joiners to a conversation
+- Real-time dashboards
+</Info>
+
+## Reading from an offset
+
+When you read from a stream, you specify an offset using the `offset` query parameter:
+
+```http
+GET https://streams.example.com/my-stream?offset=100_5678
+```
+
+The server returns:
+
+1. **Data**: Bytes starting from that offset
+2. **Stream-Next-Offset header**: The offset for the next read
+
+<CodeGroup>
+
+```typescript TypeScript
+const response = await stream({
+  url: 'https://streams.example.com/my-stream',
+  offset: '100_5678'
+})
+
+// The response tells you where to read next
+console.log(response.offset)  // e.g., '100_9999'
+
+// Access the HTTP headers directly
+console.log(response.headers.get('stream-next-offset'))
+```
+
+```python Python
+response = stream(
+    url='https://streams.example.com/my-stream',
+    offset='100_5678'
+)
+
+# The response tells you where to read next
+print(response.offset)  # e.g., '100_9999'
+
+# Access the HTTP headers directly
+print(response.headers.get('stream-next-offset'))
+```
+
+</CodeGroup>
+
+## Automatic offset tracking
+
+Client libraries automatically track offsets for you during live streaming:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  offset: '-1',  // Start from beginning
+  live: true     // Continue with live updates
+})
+
+// The client automatically tracks offsets as data arrives
+response.subscribeJson(async (batch) => {
+  console.log(`Received ${batch.items.length} items`)
+  console.log(`Current offset: ${batch.offset}`)
+  
+  // You can save this offset for resuming later
+  await saveCheckpoint(batch.offset)
+})
+```
+
+```python Python
+from durable_streams import stream
+
+response = stream(
+    url='https://streams.example.com/events',
+    offset='-1',  # Start from beginning
+    live=True     # Continue with live updates
+)
+
+# The client automatically tracks offsets as data arrives
+for batch in response.json_stream():
+    print(f'Received {len(batch.items)} items')
+    print(f'Current offset: {batch.offset}')
+    
+    # You can save this offset for resuming later
+    save_checkpoint(batch.offset)
+```
+
+</CodeGroup>
+
+## Resumability patterns
+
+### Pattern 1: Checkpoint on batch
+
+Save the offset after processing each batch:
+
+```typescript
+response.subscribeJson(async (batch) => {
+  // Process the batch
+  for (const item of batch.items) {
+    await processItem(item)
+  }
+  
+  // Save checkpoint after successful processing
+  await db.saveCheckpoint(batch.offset)
+})
+```
+
+### Pattern 2: Resume from saved offset
+
+Restart from your last checkpoint:
+
+```typescript
+const lastOffset = await db.getLastCheckpoint()
+
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  offset: lastOffset ?? '-1',  // Use saved offset or start from beginning
+  live: true
+})
+```
+
+### Pattern 3: Multi-tab coordination
+
+Share offsets across browser tabs using localStorage:
+
+```typescript
+// Tab 1: Save offset to localStorage
+response.subscribeJson(async (batch) => {
+  localStorage.setItem('stream-offset', batch.offset)
+  updateUI(batch.items)
+})
+
+// Tab 2: Resume from shared offset
+const sharedOffset = localStorage.getItem('stream-offset')
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  offset: sharedOffset ?? '-1'
+})
+```
+
+## Offset format
+
+While offsets are opaque, understanding the general format helps with debugging:
+
+<Warning>
+**Do not rely on offset structure in production code**. The format is implementation-defined and may change.
+</Warning>
+
+Common format: `<read-seq>_<byte-offset>`
+
+Example: `100_5678`
+- `100`: Read sequence number (chunks served)
+- `5678`: Byte offset in the stream
+
+Servers may use different formats (ULIDs, UUIDs, timestamps with random components). Always treat offsets as opaque strings.
+
+## Server-side optimizations
+
+The opaque nature of offsets enables important server-side optimizations:
+
+<Tip>
+**Offsets may encode chunk file identifiers**, allowing catch-up requests to be served directly from object storage (like S3) without touching the main database.
+</Tip>
+
+For example, an offset might encode:
+- Which chunk file contains the data
+- The position within that chunk file
+- Metadata for efficient retrieval
+
+This enables horizontal scaling and reduces database load for historical reads.
+
+## Best practices
+
+<Steps>
+
+### Always save offsets
+
+Persist offsets to enable resumability:
+
+```typescript
+// ✅ Good: Save offsets regularly
+response.subscribeJson(async (batch) => {
+  await processData(batch.items)
+  await db.saveOffset(streamId, batch.offset)
+})
+
+// ❌ Bad: No offset tracking
+response.subscribeJson(async (batch) => {
+  await processData(batch.items)
+  // Lost: Can't resume after disconnect
+})
+```
+
+### Use the returned offset
+
+Always use `Stream-Next-Offset` from the response for the next request:
+
+```typescript
+// ✅ Good: Use returned offset
+const res1 = await stream({ url, offset: '-1' })
+const res2 = await stream({ url, offset: res1.offset })
+
+// ❌ Bad: Try to calculate next offset
+const res1 = await stream({ url, offset: '-1' })
+const calculated = calculateNextOffset(res1.offset)  // Don't do this!
+```
+
+### Handle offset unavailability
+
+Be prepared for offsets that are too old (due to retention policies):
+
+```typescript
+try {
+  const response = await stream({ url, offset: savedOffset })
+  // Success
+} catch (error) {
+  if (error.code === 'GONE') {
+    // Offset expired, start fresh
+    const response = await stream({ url, offset: '-1' })
+  }
+}
+```
+
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="Message Framing" icon="frame" href="/concepts/message-framing">
+Learn how content types preserve message boundaries
+</Card>
+
+<Card title="Live Modes" icon="signal-stream" href="/concepts/live-modes">
+Explore real-time streaming with long-polling and SSE
+</Card>
+
+<Card title="Caching and Fanout" icon="network-wired" href="/concepts/caching-and-fanout">
+Understand CDN caching for massive scale
+</Card>
+
+</CardGroup>

@@ -1,0 +1,525 @@
+---
+title: "Rust Client"
+description: "API reference for the durable-streams Rust library"
+---
+
+# Rust Client
+
+The official Rust client for Durable Streams protocol with async/await support.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+durable-streams = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+## Quick Start
+
+```rust
+use durable_streams::{Client, Offset};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create client
+    let client = Client::new();
+    let stream = client.stream("https://streams.example.com/my-stream");
+
+    // Create stream
+    stream.create().await?;
+
+    // Append data
+    stream.append(b"{\"message\":\"hello\"}").await?;
+
+    // Read with iterator
+    let mut reader = stream.read()
+        .offset(Offset::Beginning)
+        .live_mode(durable_streams::LiveMode::LongPoll)
+        .build()?;
+
+    while let Some(chunk) = reader.next_chunk().await? {
+        println!("Got {} bytes", chunk.data.len());
+    }
+
+    Ok(())
+}
+```
+
+## Core APIs
+
+### Client
+
+<ParamField path="Client::new()" type="function">
+  Create a new client with default settings
+
+  Returns: `Client`
+</ParamField>
+
+<ParamField path="Client::builder()" type="function">
+  Create a builder for custom configuration
+
+  Returns: `ClientBuilder`
+</ParamField>
+
+**Example:**
+
+```rust
+use durable_streams::Client;
+use std::time::Duration;
+
+let client = Client::builder()
+    .base_url("https://streams.example.com")
+    .timeout(Duration::from_secs(30))
+    .header("Authorization", "Bearer token")
+    .build()?;
+```
+
+<ParamField path="stream()" type="method">
+  Get a handle to a stream (no network I/O)
+
+  <ParamField path="url" type="&str" required>
+    Stream URL (absolute or relative to base_url)
+  </ParamField>
+
+  Returns: `DurableStream`
+</ParamField>
+
+### DurableStream
+
+Handle to a durable stream for read/write operations.
+
+#### Write Operations
+
+<ParamField path="create()" type="async method">
+  Create a new stream with default settings
+
+  Returns: `Result<(), StreamError>`
+
+  Errors: `StreamError::AlreadyExists` if stream already exists
+</ParamField>
+
+<ParamField path="create_with_options()" type="async method">
+  Create a stream with options
+
+  <ParamField path="options" type="CreateOptions" required>
+    <ParamField path="content_type" type="&str">
+      Content type (default: `"application/octet-stream"`)
+    </ParamField>
+    <ParamField path="ttl" type="Duration">
+      Time-to-live
+    </ParamField>
+    <ParamField path="expires_at" type="DateTime<Utc>">
+      Absolute expiry time
+    </ParamField>
+    <ParamField path="closed" type="bool" default="false">
+      Create in closed state
+    </ParamField>
+  </ParamField>
+
+  Returns: `Result<(), StreamError>`
+</ParamField>
+
+**Example:**
+
+```rust
+use durable_streams::CreateOptions;
+use std::time::Duration;
+
+stream.create_with_options(
+    CreateOptions::new()
+        .content_type("application/json")
+        .ttl(Duration::from_secs(86400))
+).await?;
+```
+
+<ParamField path="append()" type="async method">
+  Append data to the stream
+
+  <ParamField path="data" type="&[u8]" required>
+    Data to append (for JSON, serialize first)
+  </ParamField>
+
+  Returns: `Result<AppendResponse, StreamError>` with `next_offset`
+
+  Errors: `StreamError::NotFound`, `StreamError::Closed`, etc.
+</ParamField>
+
+**Example:**
+
+```rust
+// JSON stream - serialize first
+use serde_json::json;
+
+let message = json!({"message": "hello"});
+let json = serde_json::to_vec(&message)?;
+let response = stream.append(&json).await?;
+println!("Offset: {:?}", response.next_offset);
+
+// Byte stream
+stream.append(b"raw bytes").await?;
+```
+
+<ParamField path="append_with_options()" type="async method">
+  Append with options
+
+  <ParamField path="data" type="&[u8]" required>
+    Data to append
+  </ParamField>
+  <ParamField path="options" type="AppendOptions">
+    <ParamField path="seq" type="&str">
+      Writer coordination sequence
+    </ParamField>
+  </ParamField>
+
+  Returns: `Result<AppendResponse, StreamError>`
+</ParamField>
+
+<ParamField path="close()" type="async method">
+  Close the stream permanently (no more appends)
+
+  Returns: `Result<CloseResponse, StreamError>` with `final_offset`
+
+  Errors: `StreamError::Closed` if already closed with data
+</ParamField>
+
+<ParamField path="close_with_data()" type="async method">
+  Close with optional final message
+
+  <ParamField path="data" type="&[u8]">
+    Final message
+  </ParamField>
+
+  Returns: `Result<CloseResponse, StreamError>`
+</ParamField>
+
+<ParamField path="delete()" type="async method">
+  Delete the stream
+
+  Returns: `Result<(), StreamError>`
+
+  Errors: `StreamError::NotFound` if stream doesn't exist
+</ParamField>
+
+#### Read Operations
+
+<ParamField path="read()" type="method">
+  Create a builder for reading the stream
+
+  Returns: `ReadBuilder`
+</ParamField>
+
+**Example:**
+
+```rust
+use durable_streams::{Offset, LiveMode};
+
+let mut reader = stream.read()
+    .offset(last_offset)
+    .live_mode(LiveMode::LongPoll)
+    .build()?;
+
+while let Some(chunk) = reader.next_chunk().await? {
+    println!("Got {} bytes at offset {:?}", chunk.data.len(), chunk.offset);
+    // Save checkpoint
+    save_offset(&chunk.offset).await?;
+}
+```
+
+<ParamField path="head()" type="async method">
+  Get stream metadata via HEAD request
+
+  Returns: `Result<HeadResponse, StreamError>` with `content_type`, `offset`, `closed`
+</ParamField>
+
+### ChunkIterator
+
+Asynchronous iterator for reading stream chunks.
+
+<ParamField path="next_chunk()" type="async method">
+  Get the next chunk
+
+  Returns: `Result<Option<Chunk>, StreamError>`
+
+  Returns `Ok(None)` when iteration is complete.
+
+  <ResponseField name="Chunk" type="struct">
+    <ResponseField name="data" type="Vec<u8>">
+      Chunk data
+    </ResponseField>
+    <ResponseField name="offset" type="Offset">
+      Offset after this chunk
+    </ResponseField>
+    <ResponseField name="up_to_date" type="bool">
+      Whether we've reached the current end
+    </ResponseField>
+    <ResponseField name="cursor" type="Option<String>">
+      Stream cursor for CDN collapsing
+    </ResponseField>
+  </ResponseField>
+</ParamField>
+
+### Producer
+
+Idempotent producer for exactly-once writes with automatic batching.
+
+```rust
+use durable_streams::{Producer, ProducerBuilder};
+
+let producer = Producer::builder()
+    .url("https://streams.example.com/orders")
+    .producer_id("order-service-1")
+    .epoch(0)
+    .auto_claim(true)
+    .max_batch_bytes(1024 * 1024)
+    .build()?;
+
+// Fire-and-forget writes
+producer.append(b"{\"orderId\":\"123\"}").await?;
+producer.append(b"{\"orderId\":\"456\"}").await?;
+
+// Ensure delivery
+producer.flush().await?;
+producer.close().await?;
+```
+
+<ParamField path="Producer::builder()" type="function">
+  Create a producer builder
+
+  Returns: `ProducerBuilder`
+
+  <ParamField path="url" type="&str" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="producer_id" type="&str" required>
+    Stable identifier
+  </ParamField>
+  <ParamField path="epoch" type="u64" default="0">
+    Starting epoch
+  </ParamField>
+  <ParamField path="auto_claim" type="bool" default="false">
+    Auto-retry with epoch+1 on 403
+  </ParamField>
+  <ParamField path="max_batch_bytes" type="usize" default="1048576">
+    Max batch size (1MB)
+  </ParamField>
+  <ParamField path="linger_ms" type="u64" default="5">
+    Max wait before sending batch
+  </ParamField>
+  <ParamField path="max_in_flight" type="usize" default="5">
+    Max concurrent batches
+  </ParamField>
+</ParamField>
+
+<ParamField path="append()" type="async method">
+  Append data (fire-and-forget after buffering)
+
+  <ParamField path="data" type="&[u8]" required>
+    Data to append
+  </ParamField>
+
+  Returns: `Result<(), ProducerError>`
+</ParamField>
+
+<ParamField path="flush()" type="async method">
+  Send pending batch and wait for all in-flight batches
+
+  Returns: `Result<(), ProducerError>`
+</ParamField>
+
+<ParamField path="close()" type="async method">
+  Flush and close the stream (EOF)
+
+  Returns: `Result<CloseResponse, ProducerError>`
+</ParamField>
+
+<ParamField path="close_with_data()" type="async method">
+  Close with optional final message (idempotent)
+
+  <ParamField path="data" type="&[u8]">
+    Final message
+  </ParamField>
+
+  Returns: `Result<CloseResponse, ProducerError>`
+</ParamField>
+
+## Types
+
+### Offset
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offset(String);
+
+impl Offset {
+    pub const fn beginning() -> Self {
+        Self(String::from("-1"))
+    }
+
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+```
+
+### LiveMode
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveMode {
+    Off,       // Catch-up only
+    LongPoll,  // Long-polling
+    Sse,       // Server-Sent Events
+}
+```
+
+### AppendResponse
+
+```rust
+pub struct AppendResponse {
+    pub next_offset: Offset,
+    pub etag: Option<String>,
+}
+```
+
+### HeadResponse
+
+```rust
+pub struct HeadResponse {
+    pub content_type: Option<String>,
+    pub offset: Offset,
+    pub closed: bool,
+    pub ttl: Option<Duration>,
+}
+```
+
+### CloseResponse
+
+```rust
+pub struct CloseResponse {
+    pub final_offset: Offset,
+}
+```
+
+## Error Handling
+
+```rust
+use durable_streams::StreamError;
+
+match stream.append(data).await {
+    Ok(response) => println!("Appended at {:?}", response.next_offset),
+    Err(StreamError::NotFound) => eprintln!("Stream not found"),
+    Err(StreamError::Closed) => eprintln!("Stream is closed"),
+    Err(StreamError::Conflict) => eprintln!("Conflict"),
+    Err(e) => eprintln!("Error: {}", e),
+}
+```
+
+### StreamError Variants
+
+```rust
+pub enum StreamError {
+    NotFound,
+    AlreadyExists,
+    Closed,
+    Conflict,
+    Unauthorized,
+    Forbidden,
+    RateLimited,
+    ServerError(u16),
+    Network(reqwest::Error),
+    InvalidHeader(InvalidHeaderError),
+}
+```
+
+## Advanced Features
+
+### Custom HTTP Client
+
+```rust
+use reqwest::Client as HttpClient;
+use std::time::Duration;
+
+let http_client = HttpClient::builder()
+    .timeout(Duration::from_secs(30))
+    .pool_max_idle_per_host(10)
+    .build()?;
+
+let client = Client::builder()
+    .http_client(http_client)
+    .build()?;
+```
+
+### Serde Integration
+
+```rust
+use serde::{Deserialize, Serialize};
+use serde_json;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Event {
+    id: String,
+    event_type: String,
+    data: serde_json::Value,
+}
+
+// Serialize and append
+let event = Event {
+    id: "123".to_string(),
+    event_type: "order.created".to_string(),
+    data: serde_json::json!({"orderId": "456"}),
+};
+
+let json = serde_json::to_vec(&event)?;
+stream.append(&json).await?;
+
+// Read and deserialize
+let mut reader = stream.read().build()?;
+while let Some(chunk) = reader.next_chunk().await? {
+    // Parse JSON array
+    let events: Vec<Event> = serde_json::from_slice(&chunk.data)?;
+    for event in events {
+        println!("Event {}: {}", event.id, event.event_type);
+    }
+}
+```
+
+### Tokio Streams
+
+```rust
+use futures::StreamExt;
+
+let mut reader = stream.read().build()?;
+
+while let Some(result) = reader.next_chunk().await.transpose() {
+    match result {
+        Ok(chunk) => {
+            // Process chunk
+            println!("Got {} bytes", chunk.data.len());
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            break;
+        }
+    }
+}
+```
+
+### Error Context with anyhow
+
+```rust
+use anyhow::Context;
+
+stream.append(data).await
+    .context("Failed to append to stream")?;
+```
+
+## Source Code
+
+Source: [packages/client-rust/src/](/source/packages/client-rust/src/lib.rs)

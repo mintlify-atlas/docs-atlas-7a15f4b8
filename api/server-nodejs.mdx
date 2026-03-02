@@ -1,0 +1,603 @@
+---
+title: "Node.js Server"
+description: "Reference implementation of the Durable Streams server for Node.js with in-memory and file-backed storage"
+---
+
+## Overview
+
+The Node.js server package (`@durable-streams/server`) provides a reference implementation of the Durable Streams protocol. It supports both in-memory and file-backed storage modes, making it suitable for development, testing, and production workloads.
+
+<Note>
+  This is a development/testing server. For production deployments, consider using the [Caddy-based server](/api/server-caddy).
+</Note>
+
+## Installation
+
+```bash
+npm install @durable-streams/server
+```
+
+## Quick Start
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  host: "127.0.0.1",
+})
+
+await server.start()
+console.log(`Server running at ${server.url}`)
+```
+
+## DurableStreamTestServer
+
+### Constructor
+
+```typescript
+const server = new DurableStreamTestServer(options?: TestServerOptions)
+```
+
+<ParamField path="options" type="TestServerOptions">
+  Configuration options for the server
+
+  <ParamField path="port" type="number" default="4437">
+    Port to listen on
+  </ParamField>
+
+  <ParamField path="host" type="string" default="127.0.0.1">
+    Host to bind to
+  </ParamField>
+
+  <ParamField path="longPollTimeout" type="number" default="30000">
+    Default long-poll timeout in milliseconds
+  </ParamField>
+
+  <ParamField path="dataDir" type="string">
+    Data directory for file-backed storage. If provided, enables file-backed mode using LMDB and append-only logs. If omitted, uses in-memory storage.
+  </ParamField>
+
+  <ParamField path="onStreamCreated" type="StreamLifecycleHook">
+    Hook called when a stream is created
+  </ParamField>
+
+  <ParamField path="onStreamDeleted" type="StreamLifecycleHook">
+    Hook called when a stream is deleted
+  </ParamField>
+
+  <ParamField path="compression" type="boolean" default="true">
+    Enable gzip/deflate compression for responses
+  </ParamField>
+
+  <ParamField path="cursorIntervalSeconds" type="number" default="20">
+    Interval in seconds for cursor calculation. Used for CDN cache collapsing to prevent infinite cache loops.
+  </ParamField>
+
+  <ParamField path="cursorEpoch" type="Date" default="October 9, 2024 00:00:00 UTC">
+    Epoch timestamp for cursor interval calculation
+  </ParamField>
+</ParamField>
+
+### Methods
+
+#### start()
+
+Starts the server and returns the server URL.
+
+```typescript
+await server.start(): Promise<string>
+```
+
+**Returns:** Server URL (e.g., `http://127.0.0.1:4437`)
+
+#### stop()
+
+Stops the server and cleans up resources.
+
+```typescript
+await server.stop(): Promise<void>
+```
+
+#### clear()
+
+Clears all streams from the store.
+
+```typescript
+server.clear(): void
+```
+
+#### injectFault()
+
+Injects a fault to be triggered on the next N requests to a path. Used for testing retry/resilience behavior.
+
+```typescript
+server.injectFault(path: string, fault: InjectedFault): void
+```
+
+<ParamField path="path" type="string" required>
+  Stream path to inject fault for
+</ParamField>
+
+<ParamField path="fault" type="InjectedFault">
+  Fault configuration
+
+  <ParamField path="status" type="number">
+    HTTP status code to return (if set, returns error response)
+  </ParamField>
+
+  <ParamField path="count" type="number" default="1">
+    Number of times to trigger this fault
+  </ParamField>
+
+  <ParamField path="retryAfter" type="number">
+    Retry-After header value in seconds
+  </ParamField>
+
+  <ParamField path="delayMs" type="number">
+    Delay in milliseconds before responding
+  </ParamField>
+
+  <ParamField path="dropConnection" type="boolean">
+    Drop the connection after sending headers (simulates network failure)
+  </ParamField>
+
+  <ParamField path="truncateBodyBytes" type="number">
+    Truncate response body to this many bytes
+  </ParamField>
+
+  <ParamField path="probability" type="number" default="1.0">
+    Probability of triggering fault (0-1)
+  </ParamField>
+
+  <ParamField path="method" type="string">
+    Only match specific HTTP method (GET, POST, PUT, DELETE)
+  </ParamField>
+
+  <ParamField path="corruptBody" type="boolean">
+    Corrupt the response body by flipping random bits
+  </ParamField>
+
+  <ParamField path="jitterMs" type="number">
+    Add jitter to delay (random 0-jitterMs added to delayMs)
+  </ParamField>
+</ParamField>
+
+### Properties
+
+#### url
+
+The server URL.
+
+```typescript
+server.url: string
+```
+
+#### store
+
+The underlying storage instance.
+
+```typescript
+server.store: StreamStore | FileBackedStreamStore
+```
+
+## Storage Modes
+
+### In-Memory Mode
+
+Fast, ephemeral storage for development and testing:
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  // No dataDir = in-memory storage
+})
+
+await server.start()
+```
+
+### File-Backed Mode
+
+Persistent storage with streams stored as log files and LMDB for metadata:
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  dataDir: "./data/streams",
+})
+
+await server.start()
+```
+
+## StreamStore
+
+In-memory stream storage implementation.
+
+### Methods
+
+#### create()
+
+Creates a new stream or returns existing stream if it matches configuration.
+
+```typescript
+store.create(path: string, options: CreateOptions): Stream
+```
+
+<ParamField path="path" type="string" required>
+  Stream path (URL path)
+</ParamField>
+
+<ParamField path="options" type="CreateOptions">
+  <ParamField path="contentType" type="string">
+    Content type of the stream
+  </ParamField>
+
+  <ParamField path="ttlSeconds" type="number">
+    TTL in seconds
+  </ParamField>
+
+  <ParamField path="expiresAt" type="string">
+    Absolute expiry time (ISO 8601)
+  </ParamField>
+
+  <ParamField path="initialData" type="Uint8Array">
+    Optional initial data to append on creation
+  </ParamField>
+
+  <ParamField path="closed" type="boolean">
+    Create the stream in closed state
+  </ParamField>
+</ParamField>
+
+#### get()
+
+Retrieves a stream by path.
+
+```typescript
+store.get(path: string): Stream | undefined
+```
+
+#### has()
+
+Checks if a stream exists.
+
+```typescript
+store.has(path: string): boolean
+```
+
+#### delete()
+
+Deletes a stream.
+
+```typescript
+store.delete(path: string): boolean
+```
+
+#### append()
+
+Appends data to a stream.
+
+```typescript
+store.append(path: string, data: Uint8Array, options?: AppendOptions): StreamMessage
+```
+
+<ParamField path="options" type="AppendOptions">
+  <ParamField path="seq" type="string">
+    Sequence number for write coordination
+  </ParamField>
+
+  <ParamField path="contentType" type="string">
+    Content type (must match stream's content type)
+  </ParamField>
+
+  <ParamField path="producerId" type="string">
+    Producer ID for idempotent writes
+  </ParamField>
+
+  <ParamField path="producerEpoch" type="number">
+    Producer epoch for idempotent writes
+  </ParamField>
+
+  <ParamField path="producerSeq" type="number">
+    Producer sequence for idempotent writes
+  </ParamField>
+
+  <ParamField path="close" type="boolean">
+    Close the stream after appending
+  </ParamField>
+</ParamField>
+
+#### read()
+
+Reads messages from a stream starting from an offset.
+
+```typescript
+store.read(path: string, offset?: string): ReadResult
+```
+
+**Returns:**
+```typescript
+interface ReadResult {
+  messages: StreamMessage[]
+  upToDate: boolean
+}
+```
+
+#### waitForMessages()
+
+Waits for new messages on a stream (for long-polling).
+
+```typescript
+store.waitForMessages(
+  path: string,
+  offset: string,
+  timeout: number
+): Promise<WaitResult>
+```
+
+**Returns:**
+```typescript
+interface WaitResult {
+  messages: StreamMessage[]
+  timedOut: boolean
+  streamClosed: boolean
+}
+```
+
+#### closeStream()
+
+Closes a stream to prevent further appends.
+
+```typescript
+store.closeStream(path: string): { finalOffset: string } | null
+```
+
+#### formatResponse()
+
+Formats messages for HTTP response (wraps JSON in array brackets).
+
+```typescript
+store.formatResponse(path: string, messages: StreamMessage[]): Uint8Array
+```
+
+## FileBackedStreamStore
+
+Persistent file-backed storage implementation using LMDB for metadata and append-only log files for stream data.
+
+Provides the same interface as `StreamStore` with additional cleanup methods:
+
+#### close()
+
+Closes the store and releases file handles.
+
+```typescript
+await store.close(): Promise<void>
+```
+
+## Registry Hooks
+
+Track stream lifecycle events (creation, deletion) with a registry stream:
+
+```typescript
+import {
+  DurableStreamTestServer,
+  createRegistryHooks,
+} from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  onStreamCreated: createRegistryHooks({
+    registryPath: "__registry__",
+  }).onStreamCreated,
+  onStreamDeleted: createRegistryHooks({
+    registryPath: "__registry__",
+  }).onStreamDeleted,
+})
+```
+
+The registry maintains a system stream that tracks all stream creates and deletes, useful for building admin UIs or monitoring.
+
+## Cursor Management
+
+Cursor utilities for CDN cache collision prevention:
+
+```typescript
+import {
+  calculateCursor,
+  generateResponseCursor,
+  handleCursorCollision,
+  DEFAULT_CURSOR_EPOCH,
+  DEFAULT_CURSOR_INTERVAL_SECONDS,
+} from "@durable-streams/server"
+```
+
+### calculateCursor()
+
+Calculates a time-based interval cursor.
+
+```typescript
+calculateCursor(options?: CursorOptions): string
+```
+
+<ParamField path="options" type="CursorOptions">
+  <ParamField path="epoch" type="Date" default="October 9, 2024 00:00:00 UTC">
+    Epoch timestamp for interval calculation
+  </ParamField>
+
+  <ParamField path="intervalSeconds" type="number" default="20">
+    Interval in seconds
+  </ParamField>
+</ParamField>
+
+### generateResponseCursor()
+
+Generates a response cursor ensuring monotonic progression.
+
+```typescript
+generateResponseCursor(
+  clientCursor?: string,
+  options?: CursorOptions
+): string
+```
+
+### handleCursorCollision()
+
+Handles cursor collision by adding jitter.
+
+```typescript
+handleCursorCollision(
+  clientCursor: string,
+  currentCursor: string
+): string
+```
+
+## Path Encoding
+
+Utilities for encoding/decoding stream paths:
+
+```typescript
+import {
+  encodeStreamPath,
+  decodeStreamPath,
+} from "@durable-streams/server"
+
+const encoded = encodeStreamPath("/my/stream/path")
+const decoded = decodeStreamPath(encoded)
+```
+
+## Types
+
+### StreamMessage
+
+```typescript
+interface StreamMessage {
+  data: Uint8Array
+  offset: string // Format: "<read-seq>_<byte-offset>"
+  timestamp: number
+}
+```
+
+### Stream
+
+```typescript
+interface Stream {
+  path: string
+  contentType?: string
+  messages: StreamMessage[]
+  currentOffset: string
+  lastSeq?: string
+  ttlSeconds?: number
+  expiresAt?: string
+  createdAt: number
+  producers?: Map<string, ProducerState>
+  closed?: boolean
+  closedBy?: {
+    producerId: string
+    epoch: number
+    seq: number
+  }
+}
+```
+
+### StreamLifecycleEvent
+
+```typescript
+interface StreamLifecycleEvent {
+  type: "created" | "deleted"
+  path: string
+  contentType?: string
+  timestamp: number
+}
+```
+
+### ProducerState
+
+```typescript
+interface ProducerState {
+  epoch: number
+  lastSeq: number
+  lastUpdated: number
+}
+```
+
+## Testing
+
+Use the conformance test suite to validate protocol compliance:
+
+```typescript
+import { runConformanceTests } from "@durable-streams/server-conformance-tests"
+
+runConformanceTests({
+  baseUrl: "http://localhost:4437",
+})
+```
+
+## Examples
+
+### Basic Server
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+})
+
+await server.start()
+console.log(`Server listening at ${server.url}`)
+
+// Cleanup
+process.on("SIGINT", async () => {
+  await server.stop()
+  process.exit(0)
+})
+```
+
+### Persistent Storage
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  dataDir: "./data",
+})
+
+await server.start()
+```
+
+### With Lifecycle Hooks
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  onStreamCreated: async (event) => {
+    console.log(`Stream created: ${event.path}`)
+  },
+  onStreamDeleted: async (event) => {
+    console.log(`Stream deleted: ${event.path}`)
+  },
+})
+
+await server.start()
+```
+
+### Custom Timeouts
+
+```typescript
+import { DurableStreamTestServer } from "@durable-streams/server"
+
+const server = new DurableStreamTestServer({
+  port: 4437,
+  longPollTimeout: 60000, // 60 seconds
+  compression: true,
+})
+
+await server.start()
+```

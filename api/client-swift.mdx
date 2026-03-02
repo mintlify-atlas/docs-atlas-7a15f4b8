@@ -1,0 +1,506 @@
+---
+title: "Swift Client"
+description: "API reference for the DurableStreams Swift library"
+---
+
+# Swift Client
+
+The official Swift client for Durable Streams protocol with async/await and AsyncSequence support.
+
+## Installation
+
+### Swift Package Manager
+
+Add to your `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/durable-streams/durable-streams.git", from: "0.1.0")
+]
+```
+
+Or in Xcode: File → Add Packages → Enter repository URL
+
+## Quick Start
+
+```swift
+import DurableStreams
+
+// Create a stream
+let stream = try await DurableStream.create(
+    url: URL(string: "https://streams.example.com/my-stream")!,
+    contentType: "application/json"
+)
+
+// Append data
+let json = try JSONEncoder().encode(["message": "hello"])
+try await stream.appendSync(json)
+
+// Read data as async sequence
+for try await message in stream.messages(as: Event.self) {
+    print("Event: \(message.id)")
+}
+```
+
+## Core APIs
+
+### DurableStream
+
+Actor-based stream handle (thread-safe by design).
+
+#### Static Factory Methods
+
+<ParamField path="DurableStream.create()" type="static async">
+  Create a new stream
+
+  <ParamField path="url" type="URL" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="contentType" type="String" default='"application/json"'>
+    Content type
+  </ParamField>
+  <ParamField path="ttlSeconds" type="Int?">
+    Time-to-live in seconds
+  </ParamField>
+  <ParamField path="expiresAt" type="String?">
+    Absolute expiry time (ISO8601)
+  </ParamField>
+  <ParamField path="closed" type="Bool" default="false">
+    Create in closed state
+  </ParamField>
+  <ParamField path="config" type="Configuration" default=".default">
+    Client configuration
+  </ParamField>
+
+  Returns: `DurableStream`
+
+  Throws: `DurableStreamError.conflictExists` if stream already exists
+</ParamField>
+
+<ParamField path="DurableStream.connect()" type="static async">
+  Connect to an existing stream (validates via HEAD)
+
+  <ParamField path="url" type="URL" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="config" type="Configuration" default=".default">
+    Client configuration
+  </ParamField>
+
+  Returns: `DurableStream`
+
+  Throws: `DurableStreamError.notFound` if stream doesn't exist
+</ParamField>
+
+**Example:**
+
+```swift
+let stream = try await DurableStream.create(
+    url: URL(string: "https://streams.example.com/events")!,
+    contentType: "application/json",
+    ttlSeconds: 86400,  // 24 hours
+    config: DurableStream.Configuration(
+        headers: ["Authorization": "Bearer token"],
+        timeout: 30
+    )
+)
+```
+
+#### Write Operations
+
+<ParamField path="appendSync()" type="async">
+  Append data to the stream (awaits server acknowledgment)
+
+  <ParamField path="data" type="Data" required>
+    Data to append (for JSON, encode first)
+  </ParamField>
+  <ParamField path="contentType" type="String?">
+    Content type override
+  </ParamField>
+  <ParamField path="seq" type="Int?">
+    Writer coordination sequence
+  </ParamField>
+
+  Returns: `AppendResult` with `offset` and `isDuplicate`
+
+  Throws: `DurableStreamError` on failure
+</ParamField>
+
+**Example:**
+
+```swift
+// JSON stream
+struct Message: Codable {
+    let id: String
+    let text: String
+}
+
+let message = Message(id: "123", text: "Hello")
+let json = try JSONEncoder().encode(message)
+let result = try await stream.appendSync(json)
+print("Offset: \(result.offset.rawValue)")
+
+// String append
+let result = try await stream.appendSync("raw text")
+```
+
+<ParamField path="close()" type="async">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="data" type="Data?">
+    Optional final message
+  </ParamField>
+  <ParamField path="contentType" type="String?">
+    Content type override
+  </ParamField>
+
+  Returns: `CloseResult` with `finalOffset`
+
+  Throws: `DurableStreamError.streamClosed` if called with data on already-closed stream
+</ParamField>
+
+<ParamField path="DurableStream.delete()" type="static async">
+  Delete a stream
+
+  <ParamField path="url" type="URL" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="config" type="Configuration" default=".default">
+    Client configuration
+  </ParamField>
+
+  Throws: `DurableStreamError.notFound` if stream doesn't exist
+</ParamField>
+
+#### Read Operations (AsyncSequence)
+
+<ParamField path="messages()" type="method">
+  Stream individual JSON messages as AsyncSequence
+
+  <ParamField path="as" type="T.Type" required>
+    Decodable type for JSON items
+  </ParamField>
+  <ParamField path="from" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+  <ParamField path="decoder" type="JSONDecoder" default="JSONDecoder()">
+    Custom JSON decoder
+  </ParamField>
+
+  Returns: `AsyncThrowingStream<T, Error>`
+</ParamField>
+
+**Example:**
+
+```swift
+struct Event: Codable {
+    let id: String
+    let type: String
+    let data: [String: String]
+}
+
+// Stream messages with automatic long-polling
+for try await event in stream.messages(as: Event.self, from: lastOffset) {
+    print("Event \(event.id): \(event.type)")
+    // Process event
+}
+```
+
+<ParamField path="jsonBatches()" type="method">
+  Stream JSON batches (for checkpointing)
+
+  <ParamField path="as" type="T.Type" required>
+    Decodable type
+  </ParamField>
+  <ParamField path="from" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+  <ParamField path="decoder" type="JSONDecoder" default="JSONDecoder()">
+    JSON decoder
+  </ParamField>
+
+  Returns: `AsyncThrowingStream<JsonBatch<T>, Error>`
+</ParamField>
+
+**Example:**
+
+```swift
+for try await batch in stream.jsonBatches(as: Event.self) {
+    // Process batch atomically
+    try await database.transaction { tx in
+        for event in batch.items {
+            try await tx.insert(event)
+        }
+        try await tx.saveOffset(batch.offset)
+    }
+}
+```
+
+<ParamField path="byteChunks()" type="method">
+  Stream raw byte chunks
+
+  <ParamField path="from" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+
+  Returns: `AsyncThrowingStream<ByteChunk, Error>`
+</ParamField>
+
+<ParamField path="textChunks()" type="method">
+  Stream text chunks
+
+  <ParamField path="from" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+
+  Returns: `AsyncThrowingStream<TextChunk, Error>`
+</ParamField>
+
+#### One-Shot Reads
+
+<ParamField path="readJSON()" type="async">
+  Read all data and decode as JSON array
+
+  <ParamField path="as" type="T.Type" required>
+    Decodable type
+  </ParamField>
+  <ParamField path="offset" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+  <ParamField path="decoder" type="JSONDecoder" default="JSONDecoder()">
+    JSON decoder
+  </ParamField>
+
+  Returns: `JsonBatch<T>`
+</ParamField>
+
+<ParamField path="readBytes()" type="async">
+  Read all raw bytes
+
+  <ParamField path="offset" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+
+  Returns: `ByteResult` with `data` and `offset`
+</ParamField>
+
+<ParamField path="readText()" type="async">
+  Read all data as text
+
+  <ParamField path="offset" type="Offset" default=".start">
+    Starting offset
+  </ParamField>
+
+  Returns: `TextResult` with `text` and `offset`
+</ParamField>
+
+#### Metadata
+
+<ParamField path="DurableStream.head()" type="static async">
+  Get stream metadata without establishing a handle
+
+  <ParamField path="url" type="URL" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="config" type="Configuration" default=".default">
+    Configuration
+  </ParamField>
+
+  Returns: `StreamInfo` with `offset`, `contentType`, `streamClosed`
+</ParamField>
+
+### IdempotentProducer
+
+Exactly-once writes with automatic batching (coming soon in Swift client).
+
+## Types
+
+### Offset
+
+```swift
+public struct Offset: Codable, Hashable {
+    public let rawValue: String
+
+    public static let start = Offset(rawValue: "-1")
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+```
+
+### JsonBatch&lt;T&gt;
+
+```swift
+public struct JsonBatch<T: Decodable>: Sendable {
+    public let items: [T]
+    public let offset: Offset
+    public let upToDate: Bool
+    public let cursor: String?
+}
+```
+
+### ByteChunk / TextChunk
+
+```swift
+public struct ByteChunk: Sendable {
+    public let data: Data
+    public let offset: Offset
+    public let upToDate: Bool
+    public let cursor: String?
+}
+
+public struct TextChunk: Sendable {
+    public let text: String
+    public let offset: Offset
+    public let upToDate: Bool
+    public let cursor: String?
+}
+```
+
+### Configuration
+
+```swift
+public struct Configuration: Sendable {
+    public var headers: HeadersRecord
+    public var params: ParamsRecord
+    public var timeout: TimeInterval
+    public var longPollTimeout: TimeInterval
+    public var session: URLSession
+
+    public static let `default` = Configuration()
+}
+```
+
+## Error Handling
+
+```swift
+import DurableStreams
+
+do {
+    try await stream.appendSync(data)
+} catch let error as DurableStreamError {
+    switch error.code {
+    case .notFound:
+        print("Stream not found")
+    case .streamClosed:
+        print("Stream is closed")
+    case .conflictSeq:
+        print("Sequence conflict")
+    case .unauthorized:
+        print("Not authorized")
+    default:
+        print("Error: \(error.message)")
+    }
+} catch {
+    print("Unexpected error: \(error)")
+}
+```
+
+### DurableStreamError.Code
+
+```swift
+public enum Code: String {
+    case notFound
+    case conflictExists
+    case conflictSeq
+    case streamClosed
+    case unauthorized
+    case forbidden
+    case rateLimited
+    case serverBusy
+    case timeout
+    case retentionExpired
+    case badRequest
+    case staleEpoch
+    case sequenceGap
+    case parseError
+}
+```
+
+## Advanced Features
+
+### Custom URLSession
+
+```swift
+let configuration = URLSessionConfiguration.default
+configuration.timeoutIntervalForRequest = 30
+configuration.httpMaximumConnectionsPerHost = 10
+
+let session = URLSession(configuration: configuration)
+
+let stream = try await DurableStream.connect(
+    url: streamURL,
+    config: DurableStream.Configuration(
+        session: session
+    )
+)
+```
+
+### Dynamic Headers
+
+```swift
+var headers: HeadersRecord = [:]
+headers["Authorization"] = { await authService.getToken() }
+headers["X-Request-ID"] = { UUID().uuidString }
+
+let stream = try await DurableStream.connect(
+    url: streamURL,
+    config: DurableStream.Configuration(headers: headers)
+)
+```
+
+### Task Cancellation
+
+```swift
+let task = Task {
+    for try await event in stream.messages(as: Event.self) {
+        if Task.isCancelled { break }
+        await process(event)
+    }
+}
+
+// Later: cancel the task
+task.cancel()
+```
+
+### SwiftUI Integration
+
+```swift
+struct EventsView: View {
+    @State private var events: [Event] = []
+
+    var body: some View {
+        List(events) { event in
+            EventRow(event: event)
+        }
+        .task {
+            await streamEvents()
+        }
+    }
+
+    func streamEvents() async {
+        let stream = try? await DurableStream.connect(
+            url: URL(string: "https://streams.example.com/events")!
+        )
+
+        guard let stream = stream else { return }
+
+        for try await event in stream.messages(as: Event.self) {
+            events.append(event)
+        }
+    }
+}
+```
+
+## Platform Support
+
+- iOS 15.0+
+- macOS 12.0+
+- tvOS 15.0+
+- watchOS 8.0+
+- Linux (with Foundation)
+
+## Source Code
+
+Source: [packages/client-swift/Sources/DurableStreams/](/source/packages/client-swift/Sources/DurableStreams/DurableStream.swift)

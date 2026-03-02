@@ -1,0 +1,409 @@
+---
+title: "Elixir Client"
+description: "API reference for the durable_streams Elixir library"
+---
+
+# Elixir Client
+
+The official Elixir client for Durable Streams protocol with Stream-based consumption.
+
+## Installation
+
+Add to your `mix.exs`:
+
+```elixir
+defp deps do
+  [
+    {:durable_streams, "~> 0.1.0"}
+  ]
+end
+```
+
+## Quick Start
+
+```elixir
+alias DurableStreams.Client
+alias DurableStreams.Stream, as: DSStream
+
+# Create a client
+client = Client.new("https://streams.example.com")
+
+# Get a stream handle
+stream = Client.stream(client, "/my-stream")
+
+# Create the stream
+{:ok, _} = DSStream.create(stream, content_type: "application/json")
+
+# Append data
+{:ok, result} = DSStream.append(stream, ~s({"message":"hello"}))
+IO.puts("Offset: #{result.next_offset}")
+
+# Read data
+{:ok, consumer} = DSStream.consumer(stream, offset: "-1", live: :long_poll)
+
+for {:ok, batch} <- consumer do
+  IO.inspect(batch.items, label: "Items")
+  # Save checkpoint
+  save_offset(batch.offset)
+end
+```
+
+## Core APIs
+
+### Client
+
+<ParamField path="Client.new/2" type="function">
+  Create a new client
+
+  <ParamField path="base_url" type="String.t()" required>
+    Base URL for the streams server
+  </ParamField>
+  <ParamField path="opts" type="keyword()">
+    <ParamField path=":headers" type="map()">
+      Default headers
+    </ParamField>
+    <ParamField path=":timeout" type="pos_integer()" default="30000">
+      Request timeout in milliseconds
+    </ParamField>
+  </ParamField>
+
+  Returns: `Client.t()`
+</ParamField>
+
+**Example:**
+
+```elixir
+client = Client.new("https://streams.example.com",
+  headers: %{"Authorization" => "Bearer #{token}"},
+  timeout: 60_000
+)
+```
+
+<ParamField path="Client.stream/2" type="function">
+  Get a stream handle
+
+  <ParamField path="client" type="Client.t()" required>
+    Client instance
+  </ParamField>
+  <ParamField path="path" type="String.t()" required>
+    Stream path (e.g., "/events")
+  </ParamField>
+
+  Returns: `DurableStreams.Stream.t()`
+</ParamField>
+
+### DurableStreams.Stream
+
+Handle to a durable stream for read/write operations.
+
+#### Write Operations
+
+<ParamField path="Stream.create/2" type="function">
+  Create a new stream
+
+  <ParamField path="stream" type="Stream.t()" required>
+    Stream handle
+  </ParamField>
+  <ParamField path="opts" type="keyword()">
+    <ParamField path=":content_type" type="String.t()">
+      Content type (e.g., `"application/json"`)
+    </ParamField>
+    <ParamField path=":ttl_seconds" type="integer()">
+      Time-to-live in seconds
+    </ParamField>
+    <ParamField path=":expires_at" type="String.t()">
+      Absolute expiry time (ISO8601)
+    </ParamField>
+    <ParamField path=":closed" type="boolean()" default="false">
+      Create in closed state
+    </ParamField>
+  </ParamField>
+
+  Returns: `{:ok, Stream.t()} | {:error, term()}`
+</ParamField>
+
+<ParamField path="Stream.append/3" type="function">
+  Append data to the stream
+
+  <ParamField path="stream" type="Stream.t()" required>
+    Stream handle
+  </ParamField>
+  <ParamField path="data" type="binary() | map() | list()" required>
+    Data to append (for JSON streams, pass map/list or pre-encoded string)
+  </ParamField>
+  <ParamField path="opts" type="keyword()">
+    <ParamField path=":seq" type="String.t()">
+      Writer coordination sequence
+    </ParamField>
+  </ParamField>
+
+  Returns: `{:ok, %{next_offset: String.t()}} | {:error, term()}`
+</ParamField>
+
+**Example:**
+
+```elixir
+# JSON stream - pass map (auto-encoded)
+{:ok, result} = Stream.append(stream, %{message: "hello"})
+IO.puts("Next offset: #{result.next_offset}")
+
+# Or pre-encode JSON
+{:ok, result} = Stream.append(stream, ~s({"message":"hello"}))
+
+# Byte stream
+{:ok, result} = Stream.append(stream, "raw bytes")
+```
+
+<ParamField path="Stream.close/2" type="function">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="stream" type="Stream.t()" required>
+    Stream handle
+  </ParamField>
+  <ParamField path="opts" type="keyword()">
+    <ParamField path=":data" type="binary()">
+      Optional final message
+    </ParamField>
+  </ParamField>
+
+  Returns: `{:ok, %{final_offset: String.t()}} | {:error, term()}`
+</ParamField>
+
+#### Read Operations
+
+<ParamField path="Stream.consumer/2" type="function">
+  Create a consumer for reading the stream
+
+  <ParamField path="stream" type="Stream.t()" required>
+    Stream handle
+  </ParamField>
+  <ParamField path="opts" type="keyword()">
+    <ParamField path=":offset" type="String.t()" default='"-1"'>
+      Starting offset
+    </ParamField>
+    <ParamField path=":live" type=":off | :long_poll | :sse" default=":off">
+      Live mode
+    </ParamField>
+    <ParamField path=":cursor" type="String.t()">
+      Stream cursor for CDN collapsing
+    </ParamField>
+  </ParamField>
+
+  Returns: `{:ok, Stream.t()} | {:error, term()}`
+</ParamField>
+
+**Example:**
+
+```elixir
+{:ok, consumer} = Stream.consumer(stream, offset: last_offset, live: :long_poll)
+
+for {:ok, batch} <- consumer do
+  case batch do
+    %{items: items, offset: offset} when is_list(items) ->
+      # JSON batch
+      Enum.each(items, &process_item/1)
+      save_checkpoint(offset)
+
+    %{data: data, offset: offset} ->
+      # Byte chunk
+      process_bytes(data)
+      save_checkpoint(offset)
+  end
+end
+```
+
+<ParamField path="Stream.head/1" type="function">
+  Get stream metadata via HEAD request
+
+  <ParamField path="stream" type="Stream.t()" required>
+    Stream handle
+  </ParamField>
+
+  Returns: `{:ok, %{content_type: String.t(), offset: String.t(), stream_closed: boolean()}} | {:error, term()}`
+</ParamField>
+
+<ParamField path="Stream.delete/1" type="function">
+  Delete the stream
+
+  <ParamField path="stream" type="Stream.t()" required>
+    Stream handle
+  </ParamField>
+
+  Returns: `:ok | {:error, term()}`
+</ParamField>
+
+### DurableStreams.Writer
+
+Idempotent producer for exactly-once writes.
+
+```elixir
+alias DurableStreams.Writer
+
+{:ok, writer} = Writer.start_link(
+  stream: stream,
+  producer_id: "order-service-1",
+  epoch: 0,
+  auto_claim: true,
+  max_batch_bytes: 1_048_576,
+  linger_ms: 5
+)
+
+# Fire-and-forget writes
+Writer.append(writer, ~s({"orderId":"123"}))
+Writer.append(writer, ~s({"orderId":"456"}))
+
+# Ensure delivery
+:ok = Writer.flush(writer)
+```
+
+<ParamField path="Writer.start_link/1" type="function">
+  Start an idempotent producer
+
+  <ParamField path="opts" type="keyword()" required>
+    <ParamField path=":stream" type="Stream.t()" required>
+      Stream handle
+    </ParamField>
+    <ParamField path=":producer_id" type="String.t()" required>
+      Stable identifier
+    </ParamField>
+    <ParamField path=":epoch" type="non_neg_integer()" default="0">
+      Starting epoch
+    </ParamField>
+    <ParamField path=":auto_claim" type="boolean()" default="false">
+      Auto-retry with epoch+1 on 403
+    </ParamField>
+    <ParamField path=":max_batch_bytes" type="pos_integer()" default="1048576">
+      Max batch size (1MB)
+    </ParamField>
+    <ParamField path=":linger_ms" type="non_neg_integer()" default="5">
+      Max wait before sending batch
+    </ParamField>
+  </ParamField>
+
+  Returns: `{:ok, pid()} | {:error, term()}`
+</ParamField>
+
+<ParamField path="Writer.append/2" type="function">
+  Fire-and-forget append
+
+  <ParamField path="writer" type="pid()" required>
+    Writer process
+  </ParamField>
+  <ParamField path="data" type="binary()" required>
+    Data to append
+  </ParamField>
+
+  Returns: `:ok`
+</ParamField>
+
+<ParamField path="Writer.flush/1" type="function">
+  Send pending batch and wait for all in-flight batches
+
+  <ParamField path="writer" type="pid()" required>
+    Writer process
+  </ParamField>
+
+  Returns: `:ok | {:error, term()}`
+</ParamField>
+
+## Types
+
+### Offset
+
+```elixir
+@type offset :: String.t()
+# "-1" for start of stream
+# "123_456" for specific position
+```
+
+### LiveMode
+
+```elixir
+@type live_mode :: :off | :long_poll | :sse
+# :off - catch-up only
+# :long_poll - long-polling for live updates
+# :sse - Server-Sent Events for live updates
+```
+
+## Error Handling
+
+```elixir
+case Stream.append(stream, data) do
+  {:ok, result} ->
+    IO.puts("Appended at offset #{result.next_offset}")
+
+  {:error, :stream_not_found} ->
+    IO.puts("Stream doesn't exist")
+
+  {:error, :stream_closed} ->
+    IO.puts("Stream is closed")
+
+  {:error, :seq_conflict} ->
+    IO.puts("Sequence conflict")
+
+  {:error, reason} ->
+    IO.inspect(reason, label: "Error")
+end
+```
+
+### Error Atoms
+
+- `:stream_not_found` - Stream doesn't exist (404)
+- `:stream_exists` - Stream already exists (409 on create)
+- `:stream_closed` - Stream is closed (409 with Stream-Closed header)
+- `:seq_conflict` - Sequence conflict (409)
+- `:unauthorized` - Auth required (401)
+- `:forbidden` - Access denied (403)
+
+## Advanced Features
+
+### Supervision
+
+```elixir
+children = [
+  {DurableStreams.Writer, [
+    stream: stream,
+    producer_id: "my-producer",
+    epoch: 0,
+    name: MyApp.Writer
+  ]}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)
+
+# Use named writer
+Writer.append(MyApp.Writer, data)
+```
+
+### JSON Decoding
+
+```elixir
+{:ok, consumer} = Stream.consumer(stream, offset: "-1")
+
+for {:ok, batch} <- consumer do
+  items = Jason.decode!(batch.items)
+  Enum.each(items, fn item ->
+    IO.inspect(item)
+  end)
+end
+```
+
+### Stream Processing with Flow
+
+```elixir
+alias Experimental.Flow
+
+{:ok, consumer} = Stream.consumer(stream, live: :long_poll)
+
+consumer
+|> Flow.from_enumerable()
+|> Flow.flat_map(fn {:ok, batch} -> batch.items end)
+|> Flow.map(&process_item/1)
+|> Flow.partition()
+|> Flow.reduce(fn -> [] end, fn item, acc -> [item | acc] end)
+|> Enum.to_list()
+```
+
+## Source Code
+
+Source: [packages/client-elixir/lib/durable_streams/](/source/packages/client-elixir/lib/durable_streams/client.ex)

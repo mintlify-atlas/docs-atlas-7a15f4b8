@@ -1,0 +1,307 @@
+---
+title: Database Synchronization
+description: Stream database changes to web and mobile clients for real-time synchronization with durable, resumable streams
+---
+
+Durable Streams provides a production-proven solution for streaming database changes to client applications. Built on 1.5 years of production use at [Electric](https://electric-sql.com/) for real-time Postgres sync, it reliably delivers millions of state changes every day.
+
+## Why durable streams for database sync
+
+Traditional database sync approaches face several challenges:
+
+- **Network unreliability** - Clients disconnect constantly (backgrounded tabs, network switches, page refreshes)
+- **Data loss** - WebSocket or SSE connections lose in-flight data when connections drop
+- **Complex resumption** - Building offset tracking and resume logic for each application
+- **Scale economics** - Per-connection costs make dedicated connections to millions of clients prohibitive
+
+Durable Streams solves these problems with offset-based resumability, HTTP compatibility, and CDN-friendly caching.
+
+## Core implementation pattern
+
+<Steps>
+  <Step title="Server: Stream database changes">
+    Your backend captures database changes and appends them to a durable stream. Each client gets their own stream filtered and authorized for their access level.
+
+    ```typescript
+    import { DurableStream } from "@durable-streams/client"
+
+    // Create a stream for this client's authorized data
+    const stream = await DurableStream.create({
+      url: `https://your-server.com/v1/stream/user/${userId}/data`,
+      contentType: "application/json",
+    })
+
+    // Listen to database changes and append to stream
+    for (const change of db.changes()) {
+      await stream.append(change) // JSON objects batched automatically
+    }
+    ```
+  </Step>
+
+  <Step title="Client: Receive and apply changes">
+    Clients read from their stream starting from their last known offset. The stream delivers all changes since that point, then transitions to live updates.
+
+    ```typescript
+    import { stream } from "@durable-streams/client"
+
+    // Resume from last seen position (stored locally)
+    const res = await stream({
+      url: `https://your-server.com/v1/stream/user/${userId}/data`,
+      offset: lastSeenOffset, // Or "-1" to start from beginning
+      live: true, // Continue with live updates after catch-up
+    })
+
+    // Subscribe to changes as they arrive
+    res.subscribeJson(async (batch) => {
+      for (const change of batch.items) {
+        applyChange(change) // Update local state
+      }
+      // Save offset for resumption after disconnect
+      saveOffset(batch.offset)
+    })
+    ```
+  </Step>
+
+  <Step title="Handle reconnections gracefully">
+    When the client reconnects (after page refresh, network switch, etc.), they resume from their saved offset. No data is lost, no complex state reconciliation needed.
+
+    ```typescript
+    // After page refresh or reconnect
+    const res = await stream({
+      url: `https://your-server.com/v1/stream/user/${userId}/data`,
+      offset: getSavedOffset(), // Pick up exactly where we left off
+      live: true,
+    })
+    ```
+  </Step>
+</Steps>
+
+## Complete example with State Protocol
+
+The `@durable-streams/state` package provides a higher-level abstraction for building real-time synchronized applications using TanStack DB:
+
+```typescript
+import { createStreamDB, createStateSchema } from "@durable-streams/state"
+import { z } from "zod"
+
+// Define your schema
+const schema = createStateSchema({
+  todos: {
+    schema: z.object({
+      id: z.string(),
+      text: z.string(),
+      completed: z.boolean(),
+    }),
+    type: "todo",
+    primaryKey: "id",
+  },
+})
+
+// Create stream DB
+const db = createStreamDB({
+  streamOptions: {
+    url: `https://your-server.com/v1/stream/workspace/${workspaceId}`,
+  },
+  state: schema,
+})
+
+// Preload starts syncing in the background
+await db.preload()
+
+// Query the local state (reactive)
+const todos = db.collections.todos.useAll()
+
+// Subscribe to live updates
+db.collections.todos.subscribe((todos) => {
+  console.log("Todos updated:", todos)
+})
+```
+
+## Change event format
+
+Durable Streams uses a standardized change event format compatible with the State Protocol:
+
+<CodeGroup>
+```typescript Insert event
+{
+  "headers": {
+    "operation": "insert",
+    "type": "todo"
+  },
+  "key": "todo-123",
+  "value": {
+    "id": "todo-123",
+    "text": "Buy groceries",
+    "completed": false
+  }
+}
+```
+
+```typescript Update event
+{
+  "headers": {
+    "operation": "update",
+    "type": "todo"
+  },
+  "key": "todo-123",
+  "value": {
+    "id": "todo-123",
+    "text": "Buy groceries",
+    "completed": true
+  },
+  "oldValue": {
+    "id": "todo-123",
+    "text": "Buy groceries",
+    "completed": false
+  }
+}
+```
+
+```typescript Delete event
+{
+  "headers": {
+    "operation": "delete",
+    "type": "todo"
+  },
+  "key": "todo-123",
+  "oldValue": {
+    "id": "todo-123",
+    "text": "Buy groceries",
+    "completed": true
+  }
+}
+```
+</CodeGroup>
+
+## Production features
+
+<CardGroup cols={2}>
+  <Card title="Refresh-safe" icon="arrow-rotate-right">
+    Users can refresh the page, switch tabs, or background the app—they pick up exactly where they left off with no data loss.
+  </Card>
+  
+  <Card title="Multi-device sync" icon="mobile">
+    Start on your phone, continue on your laptop—all devices stay in sync through the same durable stream.
+  </Card>
+  
+  <Card title="Offline resilience" icon="wifi-slash">
+    Clients track their offset locally. When they reconnect after being offline, they catch up on all missed changes.
+  </Card>
+  
+  <Card title="CDN scaling" icon="network-wired">
+    Offset-based URLs enable CDN caching and request collapsing. One origin server can serve millions of concurrent clients.
+  </Card>
+</CardGroup>
+
+## Authorization and filtering
+
+<Note>
+Database streams should be filtered and authorized per-user on the server side before writing to the stream. Each user gets their own stream containing only the data they're permitted to see.
+</Note>
+
+```typescript
+// Server-side: Create filtered stream per user
+const userStream = await DurableStream.create({
+  url: `https://your-server.com/v1/stream/user/${userId}/data`,
+  contentType: "application/json",
+})
+
+// Only append changes the user is authorized to see
+for (const change of db.changes()) {
+  if (await isAuthorized(userId, change)) {
+    await userStream.append(change)
+  }
+}
+```
+
+## Live vs catch-up modes
+
+Durable Streams supports two consumption modes:
+
+<Tabs>
+  <Tab title="Catch-up only">
+    Read historical data and stop when up-to-date. Perfect for initial load or backfilling.
+
+    ```typescript
+    const res = await stream({
+      url: streamUrl,
+      offset: "-1", // Start from beginning
+      live: false,  // Stop at current end
+    })
+
+    const allItems = await res.json()
+    console.log("Caught up with", allItems.length, "items")
+    ```
+  </Tab>
+  
+  <Tab title="Live updates">
+    Catch up on historical data, then seamlessly transition to real-time updates.
+
+    ```typescript
+    const res = await stream({
+      url: streamUrl,
+      offset: lastSeenOffset,
+      live: true, // Continue after catching up
+    })
+
+    res.subscribeJson(async (batch) => {
+      // Receives both catch-up and live data
+      for (const change of batch.items) {
+        applyChange(change)
+      }
+      saveOffset(batch.offset)
+    })
+    ```
+  </Tab>
+</Tabs>
+
+## Error handling and retry
+
+<Info>
+The client automatically retries on network errors and 5xx responses with exponential backoff. For custom error handling (like refreshing auth tokens), use the `onError` callback.
+</Info>
+
+```typescript
+const res = await stream({
+  url: streamUrl,
+  offset: lastSeenOffset,
+  live: true,
+  onError: async (error) => {
+    if (error instanceof FetchError && error.status === 401) {
+      // Refresh auth token and retry
+      const newToken = await refreshAuthToken()
+      return { headers: { Authorization: `Bearer ${newToken}` } }
+    }
+    // For other errors, propagate (don't return anything)
+  },
+})
+```
+
+## Performance characteristics
+
+From production use at Electric:
+
+- **Sub-15ms latency** - End-to-end delivery of database changes
+- **Millions of concurrent clients** - CDN caching enables massive scale without origin overload
+- **Exactly-once delivery** - Offset-based resumption guarantees no duplicates or gaps
+- **Memory efficient** - Streaming consumption means bounded memory usage regardless of data size
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="State Protocol" icon="database" href="/use-cases/database-sync">
+    Learn about the State Protocol for building synchronized applications
+  </Card>
+  
+  <Card title="Client Libraries" icon="code" href="/api/client-typescript">
+    Explore client libraries for TypeScript, Python, Go, and more
+  </Card>
+  
+  <Card title="Protocol Reference" icon="book" href="/protocol/http-operations">
+    Deep dive into the Durable Streams protocol specification
+  </Card>
+  
+  <Card title="Deployment Guide" icon="server" href="/guides/production-deployment">
+    Deploy Durable Streams to production with CDN configuration
+  </Card>
+</CardGroup>

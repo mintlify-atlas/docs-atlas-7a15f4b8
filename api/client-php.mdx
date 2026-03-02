@@ -1,0 +1,513 @@
+---
+title: "PHP Client"
+description: "API reference for the durable-streams PHP library"
+---
+
+# PHP Client
+
+The official PHP client for Durable Streams protocol with PSR-18 HTTP client support.
+
+## Installation
+
+```bash
+composer require durable-streams/client
+```
+
+Requires PHP 8.1 or later
+
+## Quick Start
+
+```php
+<?php
+use DurableStreams\DurableStream;
+use DurableStreams\LiveMode;
+
+// Create a stream
+$stream = DurableStream::create(
+    'https://streams.example.com/my-stream',
+    contentType: 'application/json'
+);
+
+// Append data
+$stream->append(json_encode(['message' => 'hello']));
+
+// Read data
+$response = $stream->read(offset: '-1', live: LiveMode::LongPoll);
+foreach ($response->iterJson() as $item) {
+    echo "Item: " . json_encode($item) . "\n";
+}
+```
+
+## Core APIs
+
+### DurableStream
+
+Handle for interacting with a durable stream.
+
+#### Static Factory Methods
+
+<ParamField path="DurableStream::create()" type="static">
+  Create a new stream
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="contentType" type="string" default="'application/octet-stream'">
+    Content type
+  </ParamField>
+  <ParamField path="headers" type="array<string, string>" default="[]">
+    Additional headers
+  </ParamField>
+  <ParamField path="ttlSeconds" type="int|null">
+    Time-to-live in seconds
+  </ParamField>
+  <ParamField path="expiresAt" type="string|null">
+    Absolute expiry (ISO 8601)
+  </ParamField>
+  <ParamField path="closed" type="bool" default="false">
+    Create in closed state
+  </ParamField>
+  <ParamField path="data" type="string|null">
+    Optional initial data
+  </ParamField>
+  <ParamField path="client" type="HttpClientInterface|null">
+    Optional HTTP client (PSR-18)
+  </ParamField>
+
+  Returns: `DurableStream`
+
+  Throws: `StreamExistsException` if stream already exists
+</ParamField>
+
+<ParamField path="DurableStream::connect()" type="static">
+  Connect to an existing stream (validates via HEAD)
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="headers" type="array<string, string>" default="[]">
+    Additional headers
+  </ParamField>
+  <ParamField path="client" type="HttpClientInterface|null">
+    Optional HTTP client
+  </ParamField>
+
+  Returns: `DurableStream`
+
+  Throws: `StreamNotFoundException` if stream doesn't exist
+</ParamField>
+
+**Example:**
+
+```php
+$stream = DurableStream::create(
+    'https://streams.example.com/events',
+    contentType: 'application/json',
+    ttlSeconds: 86400,  // 24 hours
+    headers: ['Authorization' => 'Bearer token123']
+);
+```
+
+#### Write Operations
+
+<ParamField path="append()" type="method">
+  Append data to the stream
+
+  <ParamField path="data" type="string" required>
+    Data to append (for JSON streams, pass pre-encoded JSON string)
+  </ParamField>
+  <ParamField path="seq" type="string|null">
+    Writer coordination sequence
+  </ParamField>
+  <ParamField path="extraHeaders" type="array<string, string>" default="[]">
+    Additional headers for this request
+  </ParamField>
+
+  Returns: `AppendResult` with `offset` and `duplicate`
+
+  Throws: `StreamClosedException`, `SeqConflictException`, `DurableStreamException`
+</ParamField>
+
+**Example:**
+
+```php
+// JSON stream - pass pre-encoded JSON
+$result = $stream->append(json_encode(['message' => 'hello']));
+echo "Offset: {$result->offset}\n";
+
+// With sequence for coordination
+$result = $stream->append(
+    json_encode(['message' => 'world']),
+    seq: 'seq-001'
+);
+
+// Byte stream
+$result = $stream->append('raw text data');
+```
+
+<ParamField path="closeStream()" type="method">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="data" type="string|null">
+    Optional final message
+  </ParamField>
+  <ParamField path="contentType" type="string|null">
+    Content type override
+  </ParamField>
+  <ParamField path="extraHeaders" type="array<string, string>" default="[]">
+    Additional headers
+  </ParamField>
+
+  Returns: `CloseResult` with `finalOffset`
+
+  Throws: `StreamClosedException` if called with data on already-closed stream
+</ParamField>
+
+<ParamField path="delete()" type="method">
+  Delete this stream
+
+  Throws: `StreamNotFoundException` if stream doesn't exist
+</ParamField>
+
+<ParamField path="DurableStream::deleteStatic()" type="static">
+  Delete a stream without creating a handle
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="headers" type="array<string, string>|null">
+    Additional headers
+  </ParamField>
+  <ParamField path="client" type="HttpClientInterface|null">
+    Optional HTTP client
+  </ParamField>
+</ParamField>
+
+#### Read Operations
+
+<ParamField path="read()" type="method">
+  Read from the stream
+
+  <ParamField path="offset" type="string" default="'-1'">
+    Starting offset
+  </ParamField>
+  <ParamField path="live" type="LiveMode" default="LiveMode::Off">
+    Live mode: `LiveMode::Off`, `LiveMode::LongPoll`, `LiveMode::SSE`
+  </ParamField>
+  <ParamField path="extraHeaders" type="array<string, string>" default="[]">
+    Additional headers
+  </ParamField>
+  <ParamField path="timeout" type="float|null">
+    Timeout in seconds
+  </ParamField>
+
+  Returns: `StreamResponse`
+</ParamField>
+
+**Example:**
+
+```php
+use DurableStreams\LiveMode;
+
+$response = $stream->read(
+    offset: $lastOffset,
+    live: LiveMode::LongPoll
+);
+
+// Iterate over JSON items
+foreach ($response->iterJson() as $item) {
+    echo "Item: " . json_encode($item) . "\n";
+}
+
+// Or get all items at once
+$items = $response->jsonAll();
+foreach ($items as $item) {
+    processItem($item);
+}
+
+// Save checkpoint
+$checkpoint = $response->offset();
+saveOffset($checkpoint);
+```
+
+<ParamField path="head()" type="method">
+  Get stream metadata via HEAD request
+
+  Returns: `HeadResult` with `offset`, `contentType`, `streamClosed`
+</ParamField>
+
+<ParamField path="DurableStream::headStatic()" type="static">
+  Get metadata without creating a handle
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="headers" type="array<string, string>|null">
+    Additional headers
+  </ParamField>
+  <ParamField path="client" type="HttpClientInterface|null">
+    Optional HTTP client
+  </ParamField>
+
+  Returns: `HeadResult`
+</ParamField>
+
+### StreamResponse
+
+Response object for reading stream data.
+
+<ParamField path="iterJson()" type="method">
+  Iterate over individual JSON items
+
+  Returns: `Iterator<mixed>`
+</ParamField>
+
+<ParamField path="iterBytes()" type="method">
+  Iterate over byte chunks
+
+  Returns: `Iterator<string>`
+</ParamField>
+
+<ParamField path="jsonAll()" type="method">
+  Get all JSON items as array
+
+  Returns: `array<mixed>`
+</ParamField>
+
+<ParamField path="readAll()" type="method">
+  Get all bytes
+
+  Returns: `string`
+</ParamField>
+
+<ParamField path="offset()" type="method">
+  Get current stream offset
+
+  Returns: `string`
+</ParamField>
+
+<ParamField path="upToDate()" type="method">
+  Check if we've reached the current end of stream
+
+  Returns: `bool`
+</ParamField>
+
+### IdempotentProducer
+
+Exactly-once writes with automatic batching.
+
+```php
+use DurableStreams\IdempotentProducer;
+
+$producer = new IdempotentProducer(
+    url: 'https://streams.example.com/orders',
+    producerId: 'order-service-1',
+    epoch: 0,
+    autoClaim: true,
+    maxBatchBytes: 1024 * 1024,
+    lingerMs: 5
+);
+
+// Fire-and-forget writes
+$producer->append(json_encode(['orderId' => '123']));
+$producer->append(json_encode(['orderId' => '456']));
+
+// Ensure delivery
+$producer->flush();
+```
+
+<ParamField path="__construct()" type="constructor">
+  Create an idempotent producer
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="producerId" type="string" required>
+    Stable identifier
+  </ParamField>
+  <ParamField path="epoch" type="int" default="0">
+    Starting epoch
+  </ParamField>
+  <ParamField path="autoClaim" type="bool" default="false">
+    Auto-retry with epoch+1 on 403
+  </ParamField>
+  <ParamField path="maxBatchBytes" type="int" default="1048576">
+    Max batch size (1MB)
+  </ParamField>
+  <ParamField path="lingerMs" type="int" default="5">
+    Max wait before sending batch
+  </ParamField>
+  <ParamField path="contentType" type="string" default="'application/octet-stream'">
+    Content type
+  </ParamField>
+  <ParamField path="client" type="HttpClientInterface|null">
+    Optional HTTP client
+  </ParamField>
+</ParamField>
+
+<ParamField path="append()" type="method">
+  Fire-and-forget append (returns immediately)
+
+  <ParamField path="data" type="string" required>
+    Data to append (for JSON, pass pre-encoded JSON)
+  </ParamField>
+</ParamField>
+
+<ParamField path="flush()" type="method">
+  Send pending batch and wait for completion
+</ParamField>
+
+## Types
+
+### LiveMode
+
+```php
+enum LiveMode: string
+{
+    case Off = 'off';
+    case LongPoll = 'long-poll';
+    case SSE = 'sse';
+}
+```
+
+### AppendResult
+
+```php
+final class AppendResult
+{
+    public readonly string $offset;
+    public readonly int $status;
+    public readonly bool $duplicate;
+}
+```
+
+### HeadResult
+
+```php
+final class HeadResult
+{
+    public readonly string $offset;
+    public readonly ?string $contentType;
+    public readonly bool $streamClosed;
+}
+```
+
+### CloseResult
+
+```php
+final class CloseResult
+{
+    public readonly string $finalOffset;
+}
+```
+
+## Error Handling
+
+```php
+use DurableStreams\Exception\{
+    DurableStreamException,
+    StreamNotFoundException,
+    StreamClosedException,
+    StreamExistsException,
+    SeqConflictException
+};
+
+try {
+    $stream->append($data);
+} catch (StreamClosedException $e) {
+    echo "Stream is closed: {$e->getUrl()}\n";
+} catch (SeqConflictException $e) {
+    echo "Sequence conflict\n";
+} catch (StreamNotFoundException $e) {
+    echo "Stream not found: {$e->getUrl()}\n";
+} catch (DurableStreamException $e) {
+    echo "Error {$e->getStatusCode()}: {$e->getMessage()}\n";
+}
+```
+
+### Exception Hierarchy
+
+- `DurableStreamException` - Base exception
+  - `StreamNotFoundException` - 404
+  - `StreamExistsException` - 409 on create
+  - `StreamClosedException` - 409 with Stream-Closed header
+  - `SeqConflictException` - 409 sequence conflict
+  - `StaleEpochException` - 403 for producers
+  - `UnauthorizedException` - 401
+  - `RateLimitedException` - 429
+  - `MessageTooLargeException` - 413
+
+## Advanced Features
+
+### Custom HTTP Client (PSR-18)
+
+```php
+use GuzzleHttp\Client;
+use DurableStreams\Internal\Psr18HttpClient;
+
+$guzzle = new Client([
+    'timeout' => 30,
+    'connect_timeout' => 10,
+]);
+
+$httpClient = new Psr18HttpClient($guzzle);
+
+$stream = new DurableStream(
+    url: 'https://streams.example.com/events',
+    client: $httpClient
+);
+```
+
+### Streaming Large Reads
+
+```php
+$response = $stream->read(live: LiveMode::LongPoll);
+
+foreach ($response->iterJson() as $item) {
+    // Process one item at a time (memory efficient)
+    processItem($item);
+
+    // Save checkpoint periodically
+    if (shouldCheckpoint()) {
+        saveOffset($response->offset());
+    }
+}
+```
+
+### JSON Batching
+
+```php
+// For JSON streams, DurableStream automatically wraps data in arrays
+// No need to wrap manually
+
+$stream = DurableStream::create(
+    'https://streams.example.com/events',
+    contentType: 'application/json'
+);
+
+// This is automatically wrapped as [{"event":"test"}] by the client
+$stream->append(json_encode(['event' => 'test']));
+```
+
+## Helper Functions
+
+The library provides global helper functions:
+
+```php
+use function DurableStreams\stream;
+
+// Quick stream creation
+$response = stream([
+    'url' => 'https://streams.example.com/events',
+    'offset' => '-1',
+    'live' => 'long-poll',
+]);
+
+foreach ($response->iterJson() as $item) {
+    echo json_encode($item) . "\n";
+}
+```
+
+## Source Code
+
+Source: [packages/client-php/src/](/source/packages/client-php/src/DurableStream.php)

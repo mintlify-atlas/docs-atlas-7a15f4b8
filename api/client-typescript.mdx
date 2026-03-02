@@ -1,0 +1,458 @@
+---
+title: "TypeScript Client"
+description: "API reference for the @durable-streams/client TypeScript library"
+---
+
+# TypeScript Client
+
+The official TypeScript/JavaScript client for Durable Streams protocol.
+
+## Installation
+
+```bash
+npm install @durable-streams/client
+# or
+pnpm add @durable-streams/client
+# or
+yarn add @durable-streams/client
+```
+
+## Quick Start
+
+```typescript
+import { stream, DurableStream } from "@durable-streams/client";
+
+// Read-only API (fetch-like)
+const res = await stream("https://streams.example.com/my-stream");
+const items = await res.json();
+
+// Read/Write handle API
+const handle = await DurableStream.create({
+  url: "https://streams.example.com/my-stream",
+  contentType: "application/json",
+});
+
+await handle.append(JSON.stringify({ message: "hello" }));
+```
+
+## Core APIs
+
+### stream()
+
+Fetch-like read API for consuming streams.
+
+<ParamField path="options" type="StreamOptions" required>
+  Configuration for the stream session
+
+  <ParamField path="url" type="string | URL" required>
+    The full URL to the durable stream
+  </ParamField>
+
+  <ParamField path="headers" type="HeadersRecord">
+    HTTP headers (values can be static strings or async functions)
+  </ParamField>
+
+  <ParamField path="params" type="ParamsRecord">
+    Query parameters (values can be static strings or async functions)
+  </ParamField>
+
+  <ParamField path="offset" type="Offset" default="-1">
+    Starting offset (`-1` for start of stream)
+  </ParamField>
+
+  <ParamField path="live" type="LiveMode" default="true">
+    Live mode: `false`, `true`, `"long-poll"`, or `"sse"`
+  </ParamField>
+
+  <ParamField path="json" type="boolean">
+    Hint: treat content as JSON even if Content-Type doesn't indicate it
+  </ParamField>
+
+  <ParamField path="signal" type="AbortSignal">
+    AbortSignal for cancellation
+  </ParamField>
+
+  <ParamField path="onError" type="StreamErrorHandler">
+    Error handler for recoverable errors
+  </ParamField>
+</ParamField>
+
+<ResponseField name="StreamResponse<TJson>" type="object">
+  Stream session with multiple consumption APIs
+
+  <ResponseField name="url" type="string">
+    The stream URL
+  </ResponseField>
+
+  <ResponseField name="offset" type="Offset">
+    Current offset (advances as data is consumed)
+  </ResponseField>
+
+  <ResponseField name="upToDate" type="boolean">
+    Whether we've reached the current end of stream
+  </ResponseField>
+
+  <ResponseField name="streamClosed" type="boolean">
+    Whether the stream is permanently closed (no more data will ever be appended)
+  </ResponseField>
+
+  <ResponseField name="body()" type="() => Promise<Uint8Array>">
+    Accumulate raw bytes until upToDate, then resolve
+  </ResponseField>
+
+  <ResponseField name="json<T>()" type="() => Promise<Array<T>>">
+    Accumulate JSON items into array, resolve at upToDate
+  </ResponseField>
+
+  <ResponseField name="text()" type="() => Promise<string>">
+    Accumulate text chunks into string, resolve at upToDate
+  </ResponseField>
+
+  <ResponseField name="bodyStream()" type="() => ReadableStream<Uint8Array>">
+    Raw bytes as ReadableStream (async iterable)
+  </ResponseField>
+
+  <ResponseField name="jsonStream()" type="() => ReadableStream<TJson>">
+    Individual JSON items as ReadableStream (async iterable)
+  </ResponseField>
+
+  <ResponseField name="subscribeJson()" type="(subscriber: (batch: JsonBatch<T>) => void | Promise<void>) => () => void">
+    Subscribe to JSON batches with backpressure control
+  </ResponseField>
+</ResponseField>
+
+**Example: Streaming JSON**
+
+```typescript
+const res = await stream<{ message: string }>({
+  url: "https://streams.example.com/chat",
+  live: true,
+});
+
+// Subscribe to batches
+res.subscribeJson(async (batch) => {
+  for (const item of batch.items) {
+    console.log(item.message);
+  }
+  // Save checkpoint
+  await db.saveOffset(batch.offset);
+});
+```
+
+### DurableStream
+
+Handle class for read/write operations.
+
+#### Static Methods
+
+<ParamField path="DurableStream.create()" type="static">
+  Create a new stream and return a handle
+
+  <ParamField path="options" type="CreateOptions" required>
+    <ParamField path="url" type="string | URL" required>
+      Stream URL
+    </ParamField>
+    <ParamField path="contentType" type="string">
+      Content type (e.g., `"application/json"`)
+    </ParamField>
+    <ParamField path="ttlSeconds" type="number">
+      Time-to-live in seconds
+    </ParamField>
+    <ParamField path="expiresAt" type="string">
+      Absolute expiry time (RFC3339)
+    </ParamField>
+    <ParamField path="closed" type="boolean" default="false">
+      Create stream in closed state
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+<ParamField path="DurableStream.connect()" type="static">
+  Validate that a stream exists via HEAD and return a handle
+
+  <ParamField path="options" type="DurableStreamOptions" required>
+    <ParamField path="url" type="string | URL" required>
+      Stream URL
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+#### Instance Methods
+
+<ParamField path="append()" type="method">
+  Append data to the stream (with automatic batching)
+
+  <ParamField path="body" type="Uint8Array | string | Promise<Uint8Array | string>" required>
+    Data to append (for JSON streams, pass pre-serialized JSON)
+  </ParamField>
+
+  <ParamField path="options" type="AppendOptions">
+    <ParamField path="seq" type="string">
+      Writer coordination sequence (monotonic, lexicographic)
+    </ParamField>
+    <ParamField path="contentType" type="string">
+      Content type override
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+**Example:**
+
+```typescript
+const stream = new DurableStream({ url: "https://..." });
+
+// JSON stream
+await stream.append(JSON.stringify({ message: "hello" }));
+
+// Byte stream
+await stream.append(new Uint8Array([1, 2, 3]));
+```
+
+<ParamField path="stream()" type="method">
+  Start a read session using the handle's URL/headers
+
+  <ParamField path="options" type="Omit<StreamOptions, 'url'>">
+    Stream options (url inherited from handle)
+  </ParamField>
+
+  Returns: `Promise<StreamResponse<TJson>>`
+</ParamField>
+
+<ParamField path="close()" type="method">
+  Close the stream permanently (no more appends allowed)
+
+  <ParamField path="options" type="CloseOptions">
+    <ParamField path="body" type="Uint8Array | string">
+      Optional final message to append atomically
+    </ParamField>
+  </ParamField>
+
+  Returns: `Promise<CloseResult>` with `finalOffset`
+</ParamField>
+
+<ParamField path="head()" type="method">
+  Get stream metadata via HEAD request
+
+  Returns: `Promise<HeadResult>` with contentType, offset, streamClosed
+</ParamField>
+
+<ParamField path="delete()" type="method">
+  Delete the stream
+</ParamField>
+
+### IdempotentProducer
+
+Exactly-once writes with Kafka-style producer semantics.
+
+```typescript
+import { IdempotentProducer, DurableStream } from "@durable-streams/client";
+
+const stream = new DurableStream({ url: "https://..." });
+const producer = new IdempotentProducer(stream, "order-service-1", {
+  epoch: 0,
+  autoClaim: true,
+  maxBatchBytes: 1024 * 1024, // 1MB
+  lingerMs: 5,
+  maxInFlight: 5,
+});
+
+// Fire-and-forget writes (returns immediately)
+producer.append(JSON.stringify({ orderId: "123" }));
+producer.append(JSON.stringify({ orderId: "456" }));
+
+// Ensure all messages are delivered
+await producer.flush();
+await producer.close();
+```
+
+<ParamField path="constructor" type="method">
+  Create an idempotent producer
+
+  <ParamField path="stream" type="DurableStream" required>
+    Target stream
+  </ParamField>
+  <ParamField path="producerId" type="string" required>
+    Stable identifier (e.g., "order-service-1")
+  </ParamField>
+  <ParamField path="options" type="IdempotentProducerOptions">
+    <ParamField path="epoch" type="number" default="0">
+      Starting epoch (increment on restart)
+    </ParamField>
+    <ParamField path="autoClaim" type="boolean" default="false">
+      Auto-retry with epoch+1 on 403 (for serverless)
+    </ParamField>
+    <ParamField path="maxBatchBytes" type="number" default="1048576">
+      Max batch size (1MB default)
+    </ParamField>
+    <ParamField path="lingerMs" type="number" default="5">
+      Max wait time before sending batch
+    </ParamField>
+    <ParamField path="maxInFlight" type="number" default="5">
+      Max concurrent batches
+    </ParamField>
+    <ParamField path="onError" type="(error: Error) => void">
+      Error callback for async failures
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+<ParamField path="append()" type="method">
+  Fire-and-forget append (returns immediately)
+
+  <ParamField path="body" type="Uint8Array | string" required>
+    Data to append (for JSON, pass pre-serialized JSON)
+  </ParamField>
+</ParamField>
+
+<ParamField path="flush()" type="method">
+  Send pending batch and wait for all in-flight batches
+
+  Returns: `Promise<void>`
+</ParamField>
+
+<ParamField path="close()" type="method">
+  Flush and close the stream (EOF)
+
+  <ParamField path="finalMessage" type="Uint8Array | string">
+    Optional final message (idempotent with producer headers)
+  </ParamField>
+
+  Returns: `Promise<CloseResult>`
+</ParamField>
+
+## Types
+
+### Offset
+
+Opaque string representing stream position. Use `-1` for start of stream.
+
+```typescript
+type Offset = string;
+```
+
+### LiveMode
+
+```typescript
+type LiveMode = boolean | "long-poll" | "sse";
+// false: catch-up only
+// true: auto-select (SSE for JSON, long-poll for binary)
+// "long-poll": explicit long-polling
+// "sse": explicit Server-Sent Events
+```
+
+### JsonBatch&lt;T&gt;
+
+```typescript
+interface JsonBatch<T = unknown> {
+  items: ReadonlyArray<T>;
+  offset: Offset;
+  upToDate: boolean;
+  cursor?: string;
+  streamClosed: boolean;
+}
+```
+
+### ByteChunk / TextChunk
+
+```typescript
+interface ByteChunk {
+  data: Uint8Array;
+  offset: Offset;
+  upToDate: boolean;
+  cursor?: string;
+  streamClosed: boolean;
+}
+
+interface TextChunk {
+  text: string;
+  offset: Offset;
+  upToDate: boolean;
+  cursor?: string;
+  streamClosed: boolean;
+}
+```
+
+## Error Handling
+
+```typescript
+import { DurableStreamError, FetchError } from "@durable-streams/client";
+
+try {
+  await stream.append(data);
+} catch (error) {
+  if (error instanceof DurableStreamError) {
+    console.log(error.code); // "NOT_FOUND" | "CONFLICT_SEQ" | ...
+    console.log(error.status); // HTTP status code
+  }
+}
+```
+
+### Error Codes
+
+- `NOT_FOUND` - Stream doesn't exist
+- `CONFLICT_SEQ` - Sequence conflict
+- `CONFLICT_EXISTS` - Stream already exists (create)
+- `STREAM_CLOSED` - Stream is permanently closed
+- `RATE_LIMITED` - Rate limit exceeded (429)
+- `UNAUTHORIZED` - Auth required (401)
+- `FORBIDDEN` - Access denied (403)
+
+## Advanced Features
+
+### Dynamic Headers
+
+```typescript
+const res = await stream({
+  url: "https://...",
+  headers: {
+    Authorization: () => getToken(), // Called per-request
+    "X-Request-ID": () => crypto.randomUUID(),
+  },
+});
+```
+
+### WritableStream Integration
+
+```typescript
+const stream = new DurableStream({ url: "https://..." });
+const writable = stream.writable({
+  producerId: "my-producer",
+  lingerMs: 10,
+});
+
+// Pipe from fetch
+const response = await fetch("https://source.com/data");
+await response.body.pipeTo(writable);
+```
+
+### Error Recovery
+
+```typescript
+const res = await stream({
+  url: "https://...",
+  onError: async (error) => {
+    if (error instanceof FetchError && error.status === 401) {
+      const newToken = await refreshToken();
+      return { headers: { Authorization: `Bearer ${newToken}` } };
+    }
+    // Return undefined to propagate error
+  },
+});
+```
+
+## Browser Support
+
+Requires modern browsers with:
+- Fetch API
+- ReadableStream
+- AbortController
+
+For older browsers, use polyfills:
+
+```bash
+npm install whatwg-fetch web-streams-polyfill
+```
+
+## Source Code
+
+Source: [packages/client/src/](/source/packages/client/src/index.ts)

@@ -1,0 +1,769 @@
+---
+title: Live Modes
+description: Real-time streaming with long-polling and Server-Sent Events for continuous updates
+---
+
+Durable Streams supports two live modes for real-time updates: **long-polling** and **Server-Sent Events (SSE)**. Both enable efficient live tailing of streams while maintaining full resumability through offsets.
+
+## Overview
+
+Live modes allow your application to receive new data as it arrives, without constantly polling the server:
+
+<CardGroup cols={2}>
+
+<Card title="Long-polling" icon="arrows-rotate">
+The server waits up to a timeout for new data before responding. Efficient for binary streams and mobile apps.
+</Card>
+
+<Card title="Server-Sent Events" icon="signal-stream">
+A persistent connection that streams data as it arrives. Ideal for JSON streams and real-time dashboards.
+</Card>
+
+</CardGroup>
+
+## Choosing a live mode
+
+Client libraries automatically select the best mode based on your stream's content type:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+// Auto-select (recommended)
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  live: true  // Auto-selects SSE for JSON, long-poll for binary
+})
+
+// Explicit mode
+const sseResponse = await stream({
+  url: 'https://streams.example.com/events',
+  live: 'sse'  // Force SSE
+})
+
+const longPollResponse = await stream({
+  url: 'https://streams.example.com/events',
+  live: 'long-poll'  // Force long-polling
+})
+
+// Catch-up only (no live updates)
+const catchUpResponse = await stream({
+  url: 'https://streams.example.com/events',
+  live: false  // Stop after reaching current end
+})
+```
+
+```python Python
+from durable_streams import stream
+
+# Auto-select (recommended)
+response = stream(
+    url='https://streams.example.com/events',
+    live=True  # Auto-selects SSE for JSON, long-poll for binary
+)
+
+# Explicit mode
+sse_response = stream(
+    url='https://streams.example.com/events',
+    live='sse'  # Force SSE
+)
+
+long_poll_response = stream(
+    url='https://streams.example.com/events',
+    live='long-poll'  # Force long-polling
+)
+
+# Catch-up only (no live updates)
+catch_up_response = stream(
+    url='https://streams.example.com/events',
+    live=False  # Stop after reaching current end
+)
+```
+
+</CodeGroup>
+
+<Tip>
+**Recommendation**: Use `live: true` to let the client choose the optimal mode. It selects SSE for JSON streams and long-polling for binary streams.
+</Tip>
+
+## Long-polling mode
+
+In long-polling mode, the client sends a GET request with `live=long-poll`. If no data is available at the requested offset, the server waits up to a timeout for new data to arrive.
+
+### How it works
+
+<Steps>
+
+### Client requests with offset
+
+```http
+GET /stream?offset=100_5678&live=long-poll
+```
+
+### Server response scenarios
+
+**Case 1: Data available**
+```http
+HTTP/1.1 200 OK
+Stream-Next-Offset: 100_9999
+Stream-Cursor: abc123
+
+[data bytes]
+```
+
+**Case 2: Timeout (no new data)**
+```http
+HTTP/1.1 204 No Content
+Stream-Next-Offset: 100_5678
+Stream-Up-To-Date: true
+Stream-Cursor: abc123
+```
+
+**Case 3: Stream closed**
+```http
+HTTP/1.1 204 No Content
+Stream-Next-Offset: 100_5678
+Stream-Up-To-Date: true
+Stream-Closed: true
+```
+
+### Client reconnects automatically
+
+After receiving a response, the client immediately makes another request with the new offset and cursor.
+
+</Steps>
+
+### Example: Long-polling in TypeScript
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+const response = await stream({
+  url: 'https://streams.example.com/notifications',
+  offset: '-1',
+  live: 'long-poll'
+})
+
+// Subscribe to batches as they arrive
+response.subscribeJson(async (batch) => {
+  console.log(`Received ${batch.items.length} notifications`)
+  
+  for (const notification of batch.items) {
+    showNotification(notification)
+  }
+  
+  // Automatically reconnects for next batch
+})
+
+// Cancel when done
+response.cancel()
+```
+
+```python Python
+from durable_streams import stream
+
+response = stream(
+    url='https://streams.example.com/notifications',
+    offset='-1',
+    live='long-poll'
+)
+
+# Subscribe to batches as they arrive
+for batch in response.json_stream():
+    print(f'Received {len(batch.items)} notifications')
+    
+    for notification in batch.items:
+        show_notification(notification)
+    
+    # Automatically reconnects for next batch
+
+# Cancel when done
+response.cancel()
+```
+
+</CodeGroup>
+
+### Advantages of long-polling
+
+<CardGroup cols={2}>
+
+<Card title="Firewall friendly" icon="shield">
+Works through restrictive firewalls and proxies that block persistent connections.
+</Card>
+
+<Card title="Mobile efficient" icon="mobile">
+Better for mobile apps where network conditions change frequently.
+</Card>
+
+<Card title="Simple infrastructure" icon="server">
+No special server configuration needed beyond HTTP.
+</Card>
+
+<Card title="Automatic reconnection" icon="arrows-rotate">
+Naturally handles connection resets and network changes.
+</Card>
+
+</CardGroup>
+
+## Server-Sent Events (SSE)
+
+SSE mode establishes a persistent HTTP connection that streams data as it arrives. The server sends events in a standardized format.
+
+### SSE event format
+
+Durable Streams uses two event types:
+
+<Tabs>
+
+<Tab title="Data events">
+
+Contain actual stream data:
+
+```
+event: data
+data: [
+data: {"id":1,"message":"hello"},
+data: {"id":2,"message":"world"}
+data: ]
+
+```
+
+For JSON streams, data events contain JSON arrays. For binary streams, data is base64-encoded.
+
+</Tab>
+
+<Tab title="Control events">
+
+Contain metadata (offset, cursor, status):
+
+```
+event: control
+data: {"streamNextOffset":"100_9999","streamCursor":"abc","upToDate":true}
+
+```
+
+Control events are emitted after each data event and provide:
+- `streamNextOffset`: Next offset to resume from
+- `streamCursor`: CDN collapsing key (optional)
+- `upToDate`: Whether we've caught up (optional)
+- `streamClosed`: Whether stream is closed (optional)
+
+</Tab>
+
+</Tabs>
+
+### Example: SSE in TypeScript
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+const response = await stream<{ id: number; message: string }>({
+  url: 'https://streams.example.com/chat/room-1',
+  offset: '-1',
+  live: 'sse'
+})
+
+// Process messages as they arrive
+response.subscribeJson(async (batch) => {
+  for (const msg of batch.items) {
+    appendToChat(msg)
+  }
+  
+  // Update UI with stream status
+  updateStatus({
+    upToDate: batch.upToDate,
+    offset: batch.offset,
+    closed: batch.streamClosed
+  })
+})
+
+// Or use async iteration
+for await (const message of response.jsonStream()) {
+  appendToChat(message)
+}
+```
+
+```python Python
+from durable_streams import stream
+
+response = stream(
+    url='https://streams.example.com/chat/room-1',
+    offset='-1',
+    live='sse'
+)
+
+# Process messages as they arrive
+for batch in response.json_stream():
+    for msg in batch.items:
+        append_to_chat(msg)
+    
+    # Update UI with stream status
+    update_status(
+        up_to_date=batch.up_to_date,
+        offset=batch.offset,
+        closed=batch.stream_closed
+    )
+```
+
+</CodeGroup>
+
+### Binary streams with SSE
+
+For non-text content types, SSE automatically base64-encodes data:
+
+```typescript
+const response = await stream({
+  url: 'https://streams.example.com/images',
+  live: 'sse'
+})
+
+// Check for base64 encoding
+if (response.headers.get('stream-sse-data-encoding') === 'base64') {
+  // Data events are base64-encoded
+  // Client library handles decoding automatically
+}
+
+for await (const chunk of response.bodyStream()) {
+  // chunk is already decoded Uint8Array
+  processImageData(chunk)
+}
+```
+
+### SSE connection lifecycle
+
+<Steps>
+
+### Initial connection
+
+```http
+GET /stream?offset=-1&live=sse
+```
+
+### Server streams events
+
+```
+event: data
+data: [{"id":1}]
+
+event: control
+data: {"streamNextOffset":"100_1","streamCursor":"abc"}
+
+event: data
+data: [{"id":2}]
+
+event: control
+data: {"streamNextOffset":"100_2","streamCursor":"def"}
+```
+
+### Server closes connection (~60s)
+
+Servers close SSE connections periodically (roughly every 60 seconds) to enable CDN request collapsing.
+
+### Client reconnects automatically
+
+```http
+GET /stream?offset=100_2&cursor=def&live=sse
+```
+
+</Steps>
+
+### Advantages of SSE
+
+<CardGroup cols={2}>
+
+<Card title="Low latency" icon="gauge-high">
+Data arrives immediately as it's available, no polling delay.
+</Card>
+
+<Card title="Efficient" icon="bolt">
+Single persistent connection reduces overhead compared to repeated requests.
+</Card>
+
+<Card title="Browser native" icon="browser">
+Built into browsers via `EventSource` API (though client libraries handle this).
+</Card>
+
+<Card title="Streaming friendly" icon="water">
+Natural fit for continuous data like chat, logs, or real-time updates.
+</Card>
+
+</CardGroup>
+
+## Catch-up mode (no live updates)
+
+Set `live: false` to read only existing data and stop at the current end:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+const response = await stream({
+  url: 'https://streams.example.com/archive',
+  offset: '-1',
+  live: false  // Stop after catching up
+})
+
+// Get all existing data
+const allData = await response.json()
+console.log(`Retrieved ${allData.length} items`)
+
+// response.closed promise resolves when done
+await response.closed
+```
+
+```python Python
+from durable_streams import stream
+
+response = stream(
+    url='https://streams.example.com/archive',
+    offset='-1',
+    live=False  # Stop after catching up
+)
+
+# Get all existing data
+all_data = response.json()
+print(f'Retrieved {len(all_data)} items')
+
+# response.closed resolves when done
+await response.closed()
+```
+
+</CodeGroup>
+
+<Info>
+Catch-up mode is useful for:
+- Batch processing of historical data
+- One-time data exports
+- Backfilling databases
+- Testing and debugging
+</Info>
+
+## Handling up-to-date state
+
+Both live modes provide `upToDate` status to indicate when you've caught up with the current end:
+
+<CodeGroup>
+
+```typescript TypeScript
+response.subscribeJson(async (batch) => {
+  if (batch.upToDate) {
+    console.log('Caught up! Now receiving live updates')
+    hideLoadingSpinner()
+  }
+  
+  processBatch(batch.items)
+})
+```
+
+```python Python
+for batch in response.json_stream():
+    if batch.up_to_date:
+        print('Caught up! Now receiving live updates')
+        hide_loading_spinner()
+    
+    process_batch(batch.items)
+```
+
+</CodeGroup>
+
+<Warning>
+`upToDate: true` does **not** mean EOF. More data may arrive in the future. Only `streamClosed: true` indicates no more data will ever be appended.
+</Warning>
+
+## Stream closure in live modes
+
+When a stream is closed, live modes behave differently:
+
+### Long-polling
+
+```http
+HTTP/1.1 204 No Content
+Stream-Closed: true
+Stream-Up-To-Date: true
+Stream-Next-Offset: 100_9999
+```
+
+The server returns immediately (no waiting) with the closure signal.
+
+### SSE
+
+```
+event: control
+data: {"streamNextOffset":"100_9999","streamClosed":true,"upToDate":true}
+```
+
+The server sends a final control event, then closes the connection.
+
+### Handling closure
+
+<CodeGroup>
+
+```typescript TypeScript
+response.subscribeJson(async (batch) => {
+  processBatch(batch.items)
+  
+  if (batch.streamClosed) {
+    console.log('Stream ended at offset:', batch.offset)
+    showCompletionMessage()
+    // Client automatically stops reconnecting
+  }
+})
+
+// Or wait for the closed promise
+await response.closed
+console.log('Stream has ended')
+```
+
+```python Python
+for batch in response.json_stream():
+    process_batch(batch.items)
+    
+    if batch.stream_closed:
+        print(f'Stream ended at offset: {batch.offset}')
+        show_completion_message()
+        # Client automatically stops reconnecting
+        break
+
+# Or wait for closure
+await response.closed()
+print('Stream has ended')
+```
+
+</CodeGroup>
+
+## Resumability with live modes
+
+Live modes are fully resumable through offsets:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { stream } from '@durable-streams/client'
+
+// Initial connection
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  offset: '-1',
+  live: true
+})
+
+let lastOffset = '-1'
+
+response.subscribeJson(async (batch) => {
+  processBatch(batch.items)
+  
+  // Save offset after each batch
+  lastOffset = batch.offset
+  await db.saveCheckpoint(lastOffset)
+})
+
+// Later, after disconnect or restart, resume from saved offset
+const resumed = await stream({
+  url: 'https://streams.example.com/events',
+  offset: lastOffset,  // Resume from checkpoint
+  live: true
+})
+```
+
+```python Python
+from durable_streams import stream
+
+# Initial connection
+response = stream(
+    url='https://streams.example.com/events',
+    offset='-1',
+    live=True
+)
+
+last_offset = '-1'
+
+for batch in response.json_stream():
+    process_batch(batch.items)
+    
+    # Save offset after each batch
+    last_offset = batch.offset
+    db.save_checkpoint(last_offset)
+
+# Later, after disconnect or restart, resume from saved offset
+resumed = stream(
+    url='https://streams.example.com/events',
+    offset=last_offset,  # Resume from checkpoint
+    live=True
+)
+```
+
+</CodeGroup>
+
+## Skip to live with `offset=now`
+
+Skip all historical data and start from the current tail:
+
+<CodeGroup>
+
+```typescript TypeScript
+const response = await stream({
+  url: 'https://streams.example.com/notifications',
+  offset: 'now',  // Skip to current end
+  live: true      // Then follow live
+})
+
+// Only receive new notifications from this point forward
+response.subscribeJson(async (batch) => {
+  for (const notification of batch.items) {
+    showNotification(notification)  // Only new ones
+  }
+})
+```
+
+```python Python
+response = stream(
+    url='https://streams.example.com/notifications',
+    offset='now',  # Skip to current end
+    live=True      # Then follow live
+)
+
+# Only receive new notifications from this point forward
+for batch in response.json_stream():
+    for notification in batch.items:
+        show_notification(notification)  # Only new ones
+```
+
+</CodeGroup>
+
+<Tip>
+`offset=now` with `live=true` is perfect for:
+- Real-time dashboards (skip historical data)
+- Late joiners to a conversation
+- Monitoring and alerting (only new events)
+- Presence tracking
+</Tip>
+
+## Error handling and resilience
+
+### Automatic reconnection
+
+Client libraries automatically reconnect on network failures:
+
+```typescript
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  live: true,
+  // Automatic exponential backoff on reconnection failures
+  backoffOptions: {
+    initialDelayMs: 100,
+    maxDelayMs: 30000,
+    maxAttempts: 10
+  }
+})
+```
+
+### SSE fallback to long-polling
+
+If SSE connections fail repeatedly (due to proxy buffering or infrastructure issues), clients can automatically fall back to long-polling:
+
+```typescript
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  live: 'sse',
+  sseResilience: {
+    minConnectionDuration: 1000,     // Connections < 1s are "short"
+    maxShortConnections: 3,          // After 3 short connections, fall back
+    backoffBaseDelay: 100,           // Backoff between retries
+    backoffMaxDelay: 5000,           // Max backoff delay
+    logWarnings: true                // Log fallback warnings
+  }
+})
+```
+
+### Custom error handling
+
+```typescript
+const response = await stream({
+  url: 'https://streams.example.com/events',
+  live: true,
+  onError: async (error) => {
+    if (error instanceof FetchError && error.status === 401) {
+      // Refresh auth token
+      const newToken = await refreshAuthToken()
+      return { headers: { Authorization: `Bearer ${newToken}` } }
+    }
+    // Let other errors propagate
+  }
+})
+```
+
+## Best practices
+
+<Steps>
+
+### Let the client choose the mode
+
+Use `live: true` for automatic mode selection:
+
+```typescript
+// ✅ Good: Auto-select
+const response = await stream({ url, live: true })
+
+// ❌ Less ideal: Manual selection without reason
+const response = await stream({ url, live: 'sse' })
+```
+
+### Save offsets regularly
+
+Checkpoint your position for resumability:
+
+```typescript
+response.subscribeJson(async (batch) => {
+  await processBatch(batch.items)
+  await db.saveCheckpoint(batch.offset)  // Save after processing
+})
+```
+
+### Handle closure gracefully
+
+Detect when streams end:
+
+```typescript
+response.subscribeJson(async (batch) => {
+  processBatch(batch.items)
+  
+  if (batch.streamClosed) {
+    console.log('Stream completed')
+    cleanupResources()
+  }
+})
+```
+
+### Use appropriate timeouts
+
+For mobile apps or unreliable networks, configure aggressive timeouts:
+
+```typescript
+const response = await stream({
+  url,
+  live: 'long-poll',  // Better for mobile
+  signal: AbortSignal.timeout(30000)  // 30s timeout
+})
+```
+
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="Idempotent Producers" icon="shield-check" href="/concepts/idempotent-producers">
+Implement exactly-once write semantics
+</Card>
+
+<Card title="Caching and Fanout" icon="network-wired" href="/concepts/caching-and-fanout">
+Scale to millions of viewers with CDN caching
+</Card>
+
+</CardGroup>

@@ -1,0 +1,774 @@
+---
+title: Installation
+description: Install Durable Streams clients and server for your platform
+---
+
+# Installation
+
+Durable Streams provides client libraries for multiple languages and platforms, plus a production-ready server.
+
+## Client Libraries
+
+Choose your language:
+
+<Tabs>
+  <Tab title="TypeScript/JavaScript">
+    ### npm packages
+
+    ```bash
+    # Client library (read/write)
+    npm install @durable-streams/client
+
+    # CLI tool
+    npm install -g @durable-streams/cli
+
+    # Reference server (development only)
+    npm install @durable-streams/server
+    ```
+
+    ### Usage
+
+    ```typescript
+    import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+    // Create a stream
+    const stream = await DurableStream.create({
+      url: "https://your-server.com/v1/stream/my-stream",
+      contentType: "application/json",
+    })
+
+    // Write with idempotent producer
+    const producer = new IdempotentProducer(stream, "my-service-1", {
+      autoClaim: true,
+    })
+
+    for (const event of events) {
+      producer.append(JSON.stringify(event))
+    }
+
+    await producer.flush()
+    await producer.close()
+
+    // Read the stream
+    const res = await stream.stream({ live: false })
+    const items = await res.json()
+    console.log(items)
+    ```
+
+    ### Browser Support
+
+    The TypeScript client works in all modern browsers:
+    - Chrome 90+
+    - Firefox 88+
+    - Safari 15+
+    - Edge 90+
+
+    ### Node.js Support
+
+    - Node.js 18+
+    - Deno 1.30+
+    - Bun 1.0+
+  </Tab>
+
+  <Tab title="Python">
+    ### Installation
+
+    ```bash
+    pip install durable-streams
+    ```
+
+    Or with uv:
+
+    ```bash
+    uv add durable-streams
+    ```
+
+    ### Basic Usage
+
+    ```python
+    from durable_streams import DurableStream
+
+    # Create a stream
+    handle = DurableStream.create(
+        "https://your-server.com/v1/stream/my-stream",
+        content_type="application/json",
+        ttl_seconds=3600,
+    )
+
+    # Append data
+    handle.append({"message": "hello"})
+    handle.append({"message": "world"})
+
+    # Read back
+    with handle.stream() as res:
+        for item in res.iter_json():
+            print(item)
+    ```
+
+    ### Async Usage
+
+    ```python
+    import asyncio
+    from durable_streams import AsyncDurableStream, IdempotentProducer
+    import json
+
+    async def main():
+        # Create stream
+        stream = await AsyncDurableStream.create(
+            "https://your-server.com/v1/stream/events",
+            content_type="application/json",
+        )
+
+        # Create idempotent producer
+        producer = IdempotentProducer(
+            stream,
+            producer_id="event-processor-1",
+            auto_claim=True,
+            linger_ms=5,
+        )
+
+        # Fire-and-forget writes
+        events = [{"type": "click"}, {"type": "scroll"}]
+        for event in events:
+            producer.append_nowait(json.dumps(event))
+
+        # Ensure delivery
+        await producer.flush()
+        await producer.close()
+
+    asyncio.run(main())
+    ```
+
+    ### Requirements
+
+    - Python 3.9+
+    - Works with asyncio, trio, anyio
+  </Tab>
+
+  <Tab title="Go">
+    ### Installation
+
+    ```bash
+    go get github.com/durable-streams/durable-streams/packages/client-go
+    ```
+
+    ### Usage
+
+    ```go
+    package main
+
+    import (
+        "context"
+        "fmt"
+        durable "github.com/durable-streams/durable-streams/packages/client-go"
+    )
+
+    func main() {
+        ctx := context.Background()
+
+        // Create a stream
+        stream, err := durable.CreateStream(ctx, durable.CreateOptions{
+            URL:         "https://your-server.com/v1/stream/my-stream",
+            ContentType: "application/json",
+        })
+        if err != nil {
+            panic(err)
+        }
+
+        // Write data
+        err = stream.Append(ctx, `{"event":"user.created","userId":"123"}`)
+        if err != nil {
+            panic(err)
+        }
+
+        // Read the stream
+        iter := stream.Read(ctx, durable.WithLive(durable.LiveModeAuto))
+        for iter.Next() {
+            fmt.Println(string(iter.Data()))
+        }
+        if err := iter.Err(); err != nil {
+            panic(err)
+        }
+    }
+    ```
+
+    ### Requirements
+
+    - Go 1.21+
+  </Tab>
+
+  <Tab title="Other Languages">
+    ### Available Client Libraries
+
+    | Language | Package | Status |
+    |----------|---------|--------|
+    | Elixir   | `durable_streams` | ✅ Production |
+    | .NET     | `DurableStreams.Client` | ✅ Production |
+    | Swift    | `DurableStreams` | ✅ Production |
+    | PHP      | `durable-streams/client` | ✅ Production |
+    | Java     | `com.durablestreams:client` | ✅ Production |
+    | Rust     | `durable-streams` | ✅ Production |
+    | Ruby     | `durable_streams` | ✅ Production |
+
+    ### Elixir Example
+
+    ```elixir
+    # Add to mix.exs
+    {:durable_streams, "~> 0.1"}
+
+    # Usage
+    {:ok, stream} = DurableStreams.create(
+      "https://your-server.com/v1/stream/my-stream",
+      content_type: "application/json"
+    )
+
+    DurableStreams.append(stream, %{event: "user.created"})
+    ```
+
+    ### .NET Example
+
+    ```bash
+    dotnet add package DurableStreams.Client
+    ```
+
+    ```csharp
+    using DurableStreams;
+
+    var stream = await DurableStream.CreateAsync(new CreateOptions
+    {
+        Url = "https://your-server.com/v1/stream/my-stream",
+        ContentType = "application/json"
+    });
+
+    await stream.AppendAsync(new { Event = "user.created" });
+    ```
+
+    ### Swift Example
+
+    ```swift
+    // Add to Package.swift
+    .package(url: "https://github.com/durable-streams/durable-streams", from: "0.1.0")
+
+    // Usage
+    import DurableStreams
+
+    let stream = try await DurableStream.create(
+        url: "https://your-server.com/v1/stream/my-stream",
+        contentType: "application/json"
+    )
+
+    try await stream.append(data: jsonData)
+    ```
+
+    <Note>
+      All client libraries pass the conformance test suite and implement the full protocol.
+      See the [packages/](https://github.com/durable-streams/durable-streams/tree/main/packages) directory for details.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Server Installation
+
+Durable Streams provides two server implementations:
+
+<Tabs>
+  <Tab title="Production (Caddy)">
+    ### Binary Downloads
+
+    Download the production Caddy-based server from [GitHub releases](https://github.com/durable-streams/durable-streams/releases).
+
+    Available for:
+    - macOS (Intel & ARM)
+    - Linux (AMD64 & ARM64)
+    - Windows (AMD64)
+
+    ### Quick Start
+
+    ```bash
+    # Download the binary for your platform
+    wget https://github.com/durable-streams/durable-streams/releases/latest/download/durable-streams-server-linux-amd64
+
+    # Make it executable
+    chmod +x durable-streams-server-linux-amd64
+
+    # Start the server
+    ./durable-streams-server-linux-amd64 dev
+    ```
+
+    The server runs on `http://localhost:4437` by default.
+
+    ### Configuration
+
+    Create a `Caddyfile` for production configuration:
+
+    ```caddy Caddyfile
+    {
+        order durable_streams before reverse_proxy
+    }
+
+    :4437 {
+        durable_streams {
+            prefix /v1/stream/
+            store file {
+                dir ./streams-data
+            }
+        }
+    }
+    ```
+
+    Start with the config:
+
+    ```bash
+    ./durable-streams-server run --config Caddyfile
+    ```
+
+    ### Storage Backends
+
+    The Caddy server supports multiple storage backends:
+
+    <AccordionGroup>
+      <Accordion title="File System (Default)">
+        ```caddy
+        durable_streams {
+            store file {
+                dir ./streams-data
+            }
+        }
+        ```
+
+        - ✅ Simple, no external dependencies
+        - ✅ Good for development and single-server deployments
+        - ❌ Not suitable for multi-server deployments
+      </Accordion>
+
+      <Accordion title="In-Memory (Testing)">
+        ```caddy
+        durable_streams {
+            store memory
+        }
+        ```
+
+        - ✅ Fast
+        - ✅ Good for testing
+        - ❌ Data lost on restart
+        - ❌ Limited by RAM
+      </Accordion>
+    </AccordionGroup>
+
+    ### Docker
+
+    ```bash
+    docker pull ghcr.io/durable-streams/server:latest
+    docker run -p 4437:4437 ghcr.io/durable-streams/server:latest
+    ```
+
+    ### Environment Variables
+
+    - `PORT` - Server port (default: 4437)
+    - `HOST` - Bind address (default: 0.0.0.0)
+    - `STREAMS_DIR` - Storage directory for file backend (default: ./streams-data)
+  </Tab>
+
+  <Tab title="Development (Node.js)">
+    ### Installation
+
+    ```bash
+    npm install @durable-streams/server
+    ```
+
+    <Warning>
+      The Node.js server is for **development only**. Use the Caddy server for production.
+    </Warning>
+
+    ### Usage
+
+    ```typescript
+    import { DurableStreamTestServer } from "@durable-streams/server"
+
+    const server = new DurableStreamTestServer({
+      port: 4437,
+      host: "127.0.0.1",
+    })
+
+    await server.start()
+    console.log(`Server running on ${server.baseUrl}`)
+    ```
+
+    ### From Source
+
+    ```bash
+    # Clone the repository
+    git clone https://github.com/durable-streams/durable-streams.git
+    cd durable-streams
+
+    # Install dependencies
+    pnpm install
+
+    # Build packages
+    pnpm build
+
+    # Start development server
+    pnpm start:dev
+    ```
+
+    The server will start on `http://localhost:4437` with live reloading.
+  </Tab>
+</Tabs>
+
+## CLI Tool
+
+The CLI is useful for testing, debugging, and scripting:
+
+### Installation
+
+```bash
+# Global installation
+npm install -g @durable-streams/cli
+
+# Or run directly with npx
+npx @durable-streams/cli create my-stream
+```
+
+### Usage
+
+<Steps>
+  <Step title="Set the server URL">
+    ```bash
+    export STREAM_URL=http://localhost:4437
+    ```
+  </Step>
+
+  <Step title="Create a stream">
+    ```bash
+    durable-stream create my-stream
+    ```
+  </Step>
+
+  <Step title="Write data">
+    ```bash
+    # Write directly
+    durable-stream write my-stream "Hello, world!"
+
+    # Pipe from stdin
+    echo '{"message": "hello"}' | durable-stream write my-stream --json
+
+    # From a file
+    cat data.json | durable-stream write my-stream --json
+    ```
+  </Step>
+
+  <Step title="Read data">
+    ```bash
+    # Read all data
+    durable-stream read my-stream
+
+    # Follow live (like tail -f)
+    durable-stream read my-stream --live
+    ```
+  </Step>
+
+  <Step title="Delete a stream">
+    ```bash
+    durable-stream delete my-stream
+    ```
+  </Step>
+</Steps>
+
+### Authentication
+
+```bash
+# Using environment variable
+export STREAM_AUTH="Bearer my-token"
+durable-stream read my-stream
+
+# Using --auth flag
+durable-stream --auth "Bearer my-token" read my-stream
+```
+
+### Options
+
+- `--content-type <type>` - Set Content-Type for writes
+- `--json` - Shorthand for `--content-type application/json`
+- `--live` - Follow stream for live updates
+- `--auth <value>` - Set Authorization header
+
+## Platform-Specific Guides
+
+<AccordionGroup>
+  <Accordion title="React / Next.js">
+    ### Installation
+
+    ```bash
+    npm install @durable-streams/client
+    ```
+
+    ### React Hook Example
+
+    ```typescript
+    import { useEffect, useState } from "react"
+    import { DurableStream } from "@durable-streams/client"
+
+    function useStream<T>(url: string) {
+      const [items, setItems] = useState<T[]>([])
+      const [error, setError] = useState<Error | null>(null)
+
+      useEffect(() => {
+        const stream = new DurableStream({ url })
+        
+        const start = async () => {
+          try {
+            const res = await stream.stream<T>({ live: "auto" })
+            res.subscribeJson(async (batch) => {
+              setItems(prev => [...prev, ...batch.items])
+            })
+          } catch (err) {
+            setError(err as Error)
+          }
+        }
+
+        start()
+      }, [url])
+
+      return { items, error }
+    }
+
+    // Usage
+    function MyComponent() {
+      const { items, error } = useStream("/v1/stream/events")
+
+      if (error) return <div>Error: {error.message}</div>
+      
+      return (
+        <ul>
+          {items.map((item, i) => (
+            <li key={i}>{JSON.stringify(item)}</li>
+          ))}
+        </ul>
+      )
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="React Native">
+    ### Installation
+
+    ```bash
+    npm install @durable-streams/client
+    ```
+
+    ### Usage
+
+    ```typescript
+    import { DurableStream } from "@durable-streams/client"
+    import { useEffect, useState } from "react"
+    import { View, Text, FlatList } from "react-native"
+
+    export default function StreamScreen() {
+      const [items, setItems] = useState([])
+
+      useEffect(() => {
+        const stream = new DurableStream({
+          url: "https://api.example.com/v1/stream/events",
+        })
+
+        const start = async () => {
+          const res = await stream.stream({ live: "auto" })
+          res.subscribeJson(async (batch) => {
+            setItems(prev => [...prev, ...batch.items])
+          })
+        }
+
+        start()
+      }, [])
+
+      return (
+        <FlatList
+          data={items}
+          renderItem={({ item }) => <Text>{JSON.stringify(item)}</Text>}
+        />
+      )
+    }
+    ```
+
+    <Note>
+      Ensure your React Native version supports `fetch` and `AbortController`. React Native 0.70+ has full support.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Cloudflare Workers">
+    ### Installation
+
+    ```bash
+    npm install @durable-streams/client
+    ```
+
+    ### Worker Example
+
+    ```typescript
+    import { DurableStream } from "@durable-streams/client"
+
+    export default {
+      async fetch(request: Request, env: Env): Promise<Response> {
+        // Create a stream
+        const stream = await DurableStream.create({
+          url: `${env.STREAM_URL}/v1/stream/events`,
+          headers: {
+            Authorization: `Bearer ${env.STREAM_TOKEN}`,
+          },
+          contentType: "application/json",
+        })
+
+        // Append event
+        await stream.append({
+          type: "request",
+          path: new URL(request.url).pathname,
+          timestamp: Date.now(),
+        })
+
+        return new Response("Event logged")
+      },
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Vercel Edge Functions">
+    ### Installation
+
+    ```bash
+    npm install @durable-streams/client
+    ```
+
+    ### Edge Function Example
+
+    ```typescript
+    import { DurableStream } from "@durable-streams/client"
+
+    export const config = {
+      runtime: "edge",
+    }
+
+    export default async function handler(req: Request) {
+      const stream = new DurableStream({
+        url: process.env.STREAM_URL!,
+        headers: {
+          Authorization: `Bearer ${process.env.STREAM_TOKEN}`,
+        },
+      })
+
+      await stream.append({
+        event: "page_view",
+        path: new URL(req.url).pathname,
+      })
+
+      return new Response("OK")
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Deno">
+    ### Installation
+
+    ```typescript
+    import { DurableStream } from "npm:@durable-streams/client"
+    ```
+
+    ### Usage
+
+    ```typescript
+    import { DurableStream } from "npm:@durable-streams/client"
+
+    const stream = await DurableStream.create({
+      url: "http://localhost:4437/v1/stream/my-stream",
+      contentType: "application/json",
+    })
+
+    await stream.append({ message: "hello from Deno" })
+
+    const res = await stream.stream({ live: false })
+    const items = await res.json()
+    console.log(items)
+    ```
+  </Accordion>
+
+  <Accordion title="Bun">
+    ### Installation
+
+    ```bash
+    bun add @durable-streams/client
+    ```
+
+    ### Usage
+
+    ```typescript
+    import { DurableStream } from "@durable-streams/client"
+
+    const stream = await DurableStream.create({
+      url: "http://localhost:4437/v1/stream/my-stream",
+      contentType: "application/json",
+    })
+
+    await stream.append({ message: "hello from Bun" })
+
+    const res = await stream.stream({ live: false })
+    const items = await res.json()
+    console.log(items)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Verification
+
+To verify your installation:
+
+<Steps>
+  <Step title="Check server is running">
+    ```bash
+    curl http://localhost:4437/health
+    ```
+
+    Expected response:
+    ```json
+    {"status": "ok"}
+    ```
+  </Step>
+
+  <Step title="Create a test stream">
+    ```bash
+    curl -X PUT http://localhost:4437/v1/stream/test \
+      -H "Content-Type: application/json"
+    ```
+  </Step>
+
+  <Step title="Write and read data">
+    ```bash
+    # Write
+    curl -X POST http://localhost:4437/v1/stream/test \
+      -H "Content-Type: application/json" \
+      -d '{"message": "hello"}'
+
+    # Read
+    curl "http://localhost:4437/v1/stream/test?offset=-1"
+    ```
+  </Step>
+</Steps>
+
+<Check>
+  If all steps succeed, your installation is complete!
+</Check>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start Guide" icon="rocket" href="/quickstart">
+    Build your first streaming application
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/client-typescript">
+    Explore the complete API documentation
+  </Card>
+  <Card title="Protocol Specification" icon="file-code" href="https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md">
+    Learn about the protocol internals
+  </Card>
+  <Card title="Examples" icon="code" href="https://github.com/durable-streams/durable-streams/tree/main/examples">
+    See example applications
+  </Card>
+</CardGroup>

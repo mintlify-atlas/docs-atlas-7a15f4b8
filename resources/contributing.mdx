@@ -1,0 +1,237 @@
+---
+title: Contributing
+description: Learn how to contribute to Durable Streams, including development setup, testing, and the contribution workflow.
+---
+
+We welcome contributions! This project follows the [Contributor Covenant](https://www.contributor-covenant.org/) code of conduct.
+
+## Development Setup
+
+### Prerequisites
+
+- Node.js >= 22
+- pnpm 10.25.0 or higher
+- Git
+
+### Clone and Install
+
+```bash
+# Clone the repository
+git clone https://github.com/durable-streams/durable-streams.git
+cd durable-streams
+
+# Install dependencies
+pnpm install
+```
+
+### Common Commands
+
+```bash
+# Build all packages
+pnpm build
+
+# Run all conformance tests (starts server automatically)
+pnpm test:run
+
+# Run specific client's conformance tests
+pnpm test:run -- --client typescript
+pnpm test:run -- --client python
+pnpm test:run -- --client go
+
+# Run tests in watch mode
+pnpm test
+
+# Lint and format
+pnpm lint:fix
+pnpm format
+
+# Type check
+pnpm typecheck
+```
+
+### Development Server
+
+```bash
+# Terminal 1: Start the local development server
+pnpm start:dev
+
+# Terminal 2: Link the CLI globally (one-time setup)
+pnpm link:dev
+
+# Set the server URL
+export STREAM_URL=http://localhost:4437
+```
+
+## Testing
+
+### Testing Philosophy
+
+Durable Streams prioritizes **conformance tests** over unit tests:
+
+1. **Server Conformance Tests** - Verify that the server correctly implements the Durable Streams protocol (language-agnostic)
+2. **Client Conformance Tests** - Test that client implementations correctly interact with the protocol
+3. **Unit Tests** - Only use when absolutely necessary for internal utilities or edge cases
+
+### Running Tests
+
+```bash
+# Run all conformance tests
+pnpm test:run
+
+# Run specific client conformance tests
+pnpm test:run -- --client typescript
+pnpm test:run -- --client python
+pnpm test:run -- --client go
+
+# Run Go tests directly
+cd packages/caddy-plugin && go test ./...
+```
+
+### Testing Your Implementation
+
+Use the conformance test suite to verify your server implements the protocol correctly:
+
+```bash
+# Run tests once (for CI)
+npx @durable-streams/server-conformance-tests --run http://localhost:4437
+
+# Watch mode - reruns tests when source files change (for development)
+npx @durable-streams/server-conformance-tests --watch src http://localhost:4437
+```
+
+Or programmatically in your own test suite:
+
+```typescript
+import { runConformanceTests } from "@durable-streams/server-conformance-tests"
+
+runConformanceTests({
+  baseUrl: "http://localhost:4437",
+})
+```
+
+## Contribution Workflow
+
+<Steps>
+  <Step title="Fork and clone the repository">
+    Fork the [durable-streams/durable-streams](https://github.com/durable-streams/durable-streams) repository and clone your fork locally.
+
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/durable-streams.git
+    cd durable-streams
+    ```
+  </Step>
+
+  <Step title="Create a feature branch">
+    Create a new branch for your changes:
+
+    ```bash
+    git checkout -b feature/my-new-feature
+    ```
+  </Step>
+
+  <Step title="Install dependencies and build">
+    Install dependencies and build all packages:
+
+    ```bash
+    pnpm install
+    pnpm build
+    ```
+  </Step>
+
+  <Step title="Make your changes">
+    Make your changes, following the code style guidelines:
+
+    - Follow existing patterns in the codebase
+    - Use TypeScript strict mode
+    - Format with Prettier (runs on commit via lint-staged)
+    - Lint with ESLint
+  </Step>
+
+  <Step title="Write or update tests">
+    For bug fixes or new features, prefer conformance tests:
+
+    1. **Evaluate**: How could a conformance test have caught this?
+    2. **Write test**: Add to appropriate test case file in `packages/client-conformance-tests/test-cases/`
+    3. **Verify**: Run tests to ensure they fail initially
+    4. **Fix**: Implement your changes
+    5. **Verify**: Ensure all tests pass
+
+    ```bash
+    pnpm test:run
+    ```
+  </Step>
+
+  <Step title="Add a changeset">
+    We use [changesets](https://github.com/changesets/changesets) for version management:
+
+    ```bash
+    pnpm changeset
+    ```
+
+    **Note**: All packages are pre-1.0. Use `patch` for changesets, not `minor`, unless it's a breaking change.
+  </Step>
+
+  <Step title="Commit your changes">
+    Commit your changes with a descriptive message:
+
+    ```bash
+    git add .
+    git commit -m "feat: add new feature"
+    ```
+
+    The pre-commit hooks will automatically format and lint your code.
+  </Step>
+
+  <Step title="Push and create a pull request">
+    Push your branch and create a pull request:
+
+    ```bash
+    git push origin feature/my-new-feature
+    ```
+
+    Then open a pull request on GitHub with a clear description of your changes.
+  </Step>
+</Steps>
+
+## Code Style
+
+- Follow existing patterns in the codebase
+- Use TypeScript strict mode for TypeScript code
+- Format with Prettier (runs automatically on commit via lint-staged)
+- Lint with ESLint
+- Ensure all tests pass before submitting
+
+## Test-Driven Bug Fixes
+
+When fixing a bug:
+
+1. **Identify**: What protocol or client behavior was incorrect?
+2. **Write test**: Add a failing conformance test that demonstrates the bug
+3. **Run test**: Verify it fails for affected clients
+4. **Fix**: Update implementations to fix the issue
+5. **Verify**: All clients now pass the conformance test
+
+This ensures:
+- The fix works across all client implementations
+- Regression protection for the specific scenario
+- Documentation of expected behavior through tests
+
+## Release Process
+
+Versioning and publishing are handled automatically by CI:
+
+```bash
+# Version packages (done by CI)
+pnpm changeset:version
+
+# Publish (done by CI)
+pnpm changeset:publish
+```
+
+## Getting Help
+
+If you have questions or need help:
+
+- Check the [Protocol Specification](https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md)
+- Read the [README](https://github.com/durable-streams/durable-streams/blob/main/README.md)
+- Open an issue on [GitHub](https://github.com/durable-streams/durable-streams/issues)

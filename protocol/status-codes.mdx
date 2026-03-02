@@ -1,0 +1,288 @@
+---
+title: Status Codes
+description: HTTP status codes used in the Durable Streams protocol and their meanings
+---
+
+The Durable Streams protocol uses standard HTTP status codes with specific semantics for stream operations.
+
+## Success Codes
+
+### 200 OK
+
+**Used in:**
+- CREATE (PUT): Stream already exists with matching configuration (idempotent success)
+- APPEND (POST): Append successful with idempotent producer (new data)
+- HEAD: Stream exists
+- READ (GET): Data available
+
+**Semantics:**
+- **For CREATE:** The stream already exists and its configuration (content type, TTL/expiry, and closure status) matches the request. This enables idempotent "create or ensure exists" semantics.
+- **For APPEND with idempotent producer:** New data was successfully appended (not a duplicate).
+- **For HEAD:** The stream exists and metadata is available in response headers.
+- **For READ (catch-up):** Data is available from the requested offset. If the offset equals the tail, returns an empty body with `Stream-Next-Offset` equal to the requested offset. If the stream is closed, must also include `Stream-Closed: true`.
+- **For READ (long-poll):** Data became available within the timeout period.
+- **For READ (SSE):** SSE stream is being established.
+
+### 201 Created
+
+**Used in:**
+- CREATE (PUT): Stream created successfully
+
+**Response headers:**
+- `Location`: The stream URL
+- `Content-Type`: The stream's content type
+- `Stream-Next-Offset`: The tail offset after any initial content
+- `Stream-Closed`: Present if created in closed state
+
+### 204 No Content
+
+**Used in:**
+- APPEND (POST): Append successful (standard case, or idempotent duplicate)
+- CLOSE (POST with Stream-Closed: true): Stream closed successfully (or already closed)
+- DELETE: Stream deleted successfully
+- READ (GET with live=long-poll): Timeout expired with no new data
+
+**Semantics:**
+- **For APPEND:** The append was successful, or (with idempotent producer headers) this is a duplicate request and the data already exists.
+- **For CLOSE:** The stream is now closed (idempotent operation).
+- **For DELETE:** The stream has been deleted.
+- **For READ (long-poll):** The long-poll timeout expired without new data arriving. Response headers include:
+  - `Stream-Next-Offset`: Current tail offset
+  - `Stream-Up-To-Date: true`: Client is caught up
+  - `Stream-Cursor`: Required when stream is open, may be omitted when `Stream-Closed` is true
+  - `Stream-Closed: true`: If present, indicates EOF
+
+### 304 Not Modified
+
+**Used in:**
+- READ (GET): Client's cached version (via If-None-Match) is still valid
+
+**Semantics:**
+The client provided an `If-None-Match` header with an `ETag` that matches the current data. No body is returned; the client should use its cached version.
+
+**Important:** ETags must vary with the stream's closure status to prevent `304` responses from hiding the closure signal.
+
+---
+
+## Client Error Codes
+
+### 400 Bad Request
+
+**Used in:**
+- CREATE (PUT): Invalid headers or parameters
+- APPEND (POST): Malformed request
+- READ (GET): Malformed offset or invalid parameters
+
+**Common causes:**
+- **CREATE:** Conflicting TTL/expiry headers (`Stream-TTL` and `Stream-Expires-At` both supplied), invalid header syntax
+- **APPEND:** 
+  - Invalid header syntax
+  - Missing `Content-Type` when body is provided
+  - Empty body without `Stream-Closed: true` header
+  - Invalid producer headers (e.g., non-integer values, incomplete producer header set, empty `Producer-Id`, epoch increase with seq != 0)
+  - Empty JSON array (`[]`) in POST body for `application/json` streams
+  - Invalid JSON in POST body for `application/json` streams
+- **READ:** Malformed offset parameter, invalid query parameters
+
+### 403 Forbidden
+
+**Used in:**
+- APPEND (POST): Stale producer epoch (zombie fencing)
+
+**Semantics:**
+The client provided idempotent producer headers with an epoch less than the server's current epoch for this producer ID. This indicates a "zombie" producer that has been fenced out by a newer instance.
+
+**Response headers:**
+- `Producer-Epoch`: The current server epoch for this producer ID
+
+**Client recovery:**
+The client can retry with a higher epoch value to claim the producer ID (auto-claim flow for ephemeral producers).
+
+### 404 Not Found
+
+**Used in:**
+- APPEND (POST): Stream does not exist
+- CLOSE (POST with Stream-Closed: true): Stream does not exist
+- DELETE: Stream does not exist
+- HEAD: Stream does not exist
+- READ (GET): Stream does not exist
+
+**Semantics:**
+The stream URL does not correspond to an existing stream. For DELETE and HEAD, this may also be returned as a successful (idempotent) operation.
+
+### 405 Method Not Allowed
+
+**Used in:**
+- APPEND (POST): Append not supported for this stream
+- CLOSE (POST with Stream-Closed: true): Close not supported for this stream
+- DELETE: Delete not supported for this stream
+
+**Semantics:**
+Servers that implement only the read path (e.g., database synchronization servers with custom injection systems) return this code for write operations.
+
+**Alternative:** `501 Not Implemented` (see below)
+
+### 409 Conflict
+
+**Used in:**
+- CREATE (PUT): Stream already exists with different configuration
+- APPEND (POST): Content type mismatch, sequence regression, stream is closed, or sequence gap detected
+
+**Semantics:**
+
+**For CREATE:**
+The stream already exists but its configuration (content type, TTL/expiry, or closure status) does not match the request.
+
+**For APPEND (sequence regression with `Stream-Seq`):**
+The provided `Stream-Seq` value is less than or equal to the last appended sequence (lexicographic comparison).
+
+**For APPEND (stream is closed):**
+Client attempted to append to a closed stream without `Stream-Closed: true` header.
+
+**Response headers when stream is closed:**
+- `Stream-Closed: true`
+- `Stream-Next-Offset`: The final offset of the closed stream
+
+**For APPEND (sequence gap with idempotent producer):**
+The provided `Producer-Seq` is greater than state.lastSeq + 1, indicating missing messages.
+
+**Response headers for sequence gap:**
+- `Producer-Expected-Seq`: The expected sequence number (state.lastSeq + 1)
+- `Producer-Received-Seq`: The received sequence number
+
+**For APPEND (content type mismatch):**
+The `Content-Type` header does not match the stream's configured content type.
+
+**Error precedence:**
+When multiple conflict conditions exist, servers should check in this order:
+1. Stream closed → `409 Conflict` with `Stream-Closed: true`
+2. Content type mismatch → `409 Conflict`
+3. Sequence regression → `409 Conflict`
+
+### 410 Gone
+
+**Used in:**
+- READ (GET): Offset is before the earliest retained position
+
+**Semantics:**
+The requested offset is before the earliest data retained by the server due to retention policies or compaction. The client must restart from a more recent offset or from the beginning (`offset=-1`).
+
+### 413 Payload Too Large
+
+**Used in:**
+- APPEND (POST): Request body exceeds server limits
+
+**Semantics:**
+The append request body size exceeds the server's configured maximum. Clients should split large appends into smaller batches.
+
+### 429 Too Many Requests
+
+**Used in:**
+- CREATE (PUT): Rate limit exceeded
+- APPEND (POST): Rate limit exceeded
+- HEAD: Rate limit exceeded
+- READ (GET): Rate limit exceeded
+
+**Semantics:**
+The client has exceeded the server's rate limits for this operation. Clients should implement exponential backoff and retry logic.
+
+---
+
+## Server Error Codes
+
+### 501 Not Implemented
+
+**Used in:**
+- APPEND (POST): Append not supported for this stream
+- CLOSE (POST with Stream-Closed: true): Close not supported for this stream
+- DELETE: Delete not supported for this stream
+
+**Semantics:**
+Servers that implement only the read path (e.g., database synchronization servers with custom injection systems) may return this code for write operations.
+
+**Alternative:** `405 Method Not Allowed` (see above)
+
+---
+
+## Status Code Summary by Operation
+
+### CREATE (PUT)
+
+| Status | Meaning |
+|--------|--------|
+| `201 Created` | Stream created successfully |
+| `200 OK` | Stream already exists with matching configuration (idempotent) |
+| `409 Conflict` | Stream already exists with different configuration |
+| `400 Bad Request` | Invalid headers or parameters (e.g., conflicting TTL/expiry) |
+| `429 Too Many Requests` | Rate limit exceeded |
+
+### APPEND (POST)
+
+| Status | Meaning |
+|--------|--------|
+| `204 No Content` | Append successful (or idempotent duplicate) |
+| `200 OK` | Append successful with idempotent producer (new data) |
+| `400 Bad Request` | Malformed request (invalid headers, empty body without close, etc.) |
+| `404 Not Found` | Stream does not exist |
+| `405 Method Not Allowed` | Append not supported for this stream |
+| `501 Not Implemented` | Append not supported for this stream |
+| `409 Conflict` | Content type mismatch, sequence regression, stream closed, or sequence gap |
+| `403 Forbidden` | Stale producer epoch (zombie fencing) |
+| `413 Payload Too Large` | Request body exceeds server limits |
+| `429 Too Many Requests` | Rate limit exceeded |
+
+### CLOSE (POST with Stream-Closed: true)
+
+| Status | Meaning |
+|--------|--------|
+| `204 No Content` | Stream closed successfully (or already closed—idempotent) |
+| `404 Not Found` | Stream does not exist |
+| `405 Method Not Allowed` | Close not supported for this stream |
+| `501 Not Implemented` | Close not supported for this stream |
+
+### DELETE
+
+| Status | Meaning |
+|--------|--------|
+| `204 No Content` | Stream deleted successfully |
+| `404 Not Found` | Stream does not exist |
+| `405 Method Not Allowed` | Delete not supported for this stream |
+| `501 Not Implemented` | Delete not supported for this stream |
+
+### HEAD
+
+| Status | Meaning |
+|--------|--------|
+| `200 OK` | Stream exists |
+| `404 Not Found` | Stream does not exist |
+| `429 Too Many Requests` | Rate limit exceeded |
+
+### READ (GET - catch-up)
+
+| Status | Meaning |
+|--------|--------|
+| `200 OK` | Data available (or empty body if offset equals tail) |
+| `304 Not Modified` | Client's cached version is still valid |
+| `400 Bad Request` | Malformed offset or invalid parameters |
+| `404 Not Found` | Stream does not exist |
+| `410 Gone` | Offset is before the earliest retained position |
+| `429 Too Many Requests` | Rate limit exceeded |
+
+### READ (GET - long-poll)
+
+| Status | Meaning |
+|--------|--------|
+| `200 OK` | Data became available within the timeout |
+| `204 No Content` | Timeout expired with no new data (or stream is closed) |
+| `400 Bad Request` | Invalid parameters |
+| `404 Not Found` | Stream does not exist |
+| `429 Too Many Requests` | Rate limit exceeded |
+
+### READ (GET - SSE)
+
+| Status | Meaning |
+|--------|--------|
+| `200 OK` | SSE stream established |
+| `400 Bad Request` | Invalid parameters |
+| `404 Not Found` | Stream does not exist |
+| `429 Too Many Requests` | Rate limit exceeded |

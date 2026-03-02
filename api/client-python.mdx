@@ -1,0 +1,477 @@
+---
+title: "Python Client"
+description: "API reference for the durable-streams Python library"
+---
+
+# Python Client
+
+The official Python client for Durable Streams protocol with both sync and async support.
+
+## Installation
+
+```bash
+pip install durable-streams
+```
+
+Requires Python 3.10+
+
+## Quick Start
+
+### Synchronous API
+
+```python
+from durable_streams import stream, DurableStream
+
+# Read-only streaming
+with stream("https://streams.example.com/my-stream") as res:
+    for item in res.iter_json():
+        print(item)
+
+# Read/write handle
+handle = DurableStream.create(
+    "https://streams.example.com/my-stream",
+    content_type="application/json",
+)
+
+handle.append({"message": "hello"})
+```
+
+### Asynchronous API
+
+```python
+from durable_streams import astream, AsyncDurableStream
+import asyncio
+
+async def main():
+    # Async streaming
+    async with astream("https://streams.example.com/my-stream") as res:
+        async for item in res.iter_json():
+            print(item)
+
+    # Async handle
+    handle = await AsyncDurableStream.create(
+        "https://streams.example.com/my-stream",
+        content_type="application/json",
+    )
+    await handle.append({"message": "hello"})
+
+asyncio.run(main())
+```
+
+## Core APIs
+
+### stream()
+
+Synchronous read API for consuming streams.
+
+<ParamField path="url" type="str" required>
+  The full URL to the durable stream
+</ParamField>
+
+<ParamField path="offset" type="Offset | None" default="-1">
+  Starting offset (`"-1"` for start of stream)
+</ParamField>
+
+<ParamField path="live" type="LiveMode" default="True">
+  Live mode: `False`, `True`, `"long-poll"`, or `"sse"`
+</ParamField>
+
+<ParamField path="headers" type="HeadersLike | None">
+  HTTP headers (values can be strings or callables)
+</ParamField>
+
+<ParamField path="params" type="ParamsLike | None">
+  Query parameters (values can be strings or callables)
+</ParamField>
+
+<ParamField path="client" type="httpx.Client | None">
+  Optional httpx.Client for connection reuse
+</ParamField>
+
+<ResponseField name="StreamResponse" type="object">
+  Context manager for consuming stream data
+
+  <ResponseField name="iter_bytes()" type="Iterator[bytes]">
+    Iterate over raw byte chunks
+  </ResponseField>
+
+  <ResponseField name="iter_json()" type="Iterator[Any]">
+    Iterate over individual JSON items
+  </ResponseField>
+
+  <ResponseField name="iter_text()" type="Iterator[str]">
+    Iterate over text chunks
+  </ResponseField>
+
+  <ResponseField name="read_all()" type="bytes">
+    Accumulate all bytes until upToDate
+  </ResponseField>
+
+  <ResponseField name="json_all()" type="list[Any]">
+    Accumulate all JSON items into list
+  </ResponseField>
+
+  <ResponseField name="offset" type="Offset">
+    Current stream offset (advances with each chunk)
+  </ResponseField>
+
+  <ResponseField name="up_to_date" type="bool">
+    Whether we've reached the current end of stream
+  </ResponseField>
+</ResponseField>
+
+**Example:**
+
+```python
+from durable_streams import stream
+
+with stream("https://streams.example.com/events", live=True) as res:
+    for event in res.iter_json():
+        print(f"Event: {event}")
+        print(f"Offset: {res.offset}")
+        # Save checkpoint
+        db.save_offset(res.offset)
+```
+
+### DurableStream
+
+Synchronous handle class for read/write operations.
+
+#### Static Methods
+
+<ParamField path="DurableStream.create()" type="classmethod">
+  Create a new stream and return a handle
+
+  <ParamField path="url" type="str" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="content_type" type="str | None">
+    Content type (e.g., `"application/json"`)
+  </ParamField>
+  <ParamField path="ttl_seconds" type="int | None">
+    Time-to-live in seconds
+  </ParamField>
+  <ParamField path="expires_at" type="str | None">
+    Absolute expiry time (RFC3339)
+  </ParamField>
+  <ParamField path="closed" type="bool" default="False">
+    Create stream in closed state
+  </ParamField>
+  <ParamField path="client" type="httpx.Client | None">
+    Optional httpx.Client
+  </ParamField>
+
+  Returns: `DurableStream`
+</ParamField>
+
+<ParamField path="DurableStream.connect()" type="classmethod">
+  Connect to an existing stream (validates via HEAD)
+
+  <ParamField path="url" type="str" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="client" type="httpx.Client | None">
+    Optional httpx.Client
+  </ParamField>
+
+  Returns: `DurableStream`
+</ParamField>
+
+#### Instance Methods
+
+<ParamField path="append()" type="method">
+  Append data to the stream (with automatic batching)
+
+  <ParamField path="data" type="bytes | str | Any" required>
+    Data to append. For JSON streams, pass dict/list (auto-serialized) or pre-serialized JSON string
+  </ParamField>
+
+  <ParamField path="seq" type="str | None">
+    Writer coordination sequence
+  </ParamField>
+
+  <ParamField path="content_type" type="str | None">
+    Content type override
+  </ParamField>
+
+  Returns: `AppendResult` with `next_offset`
+</ParamField>
+
+**Example:**
+
+```python
+handle = DurableStream("https://streams.example.com/events")
+
+# JSON stream - pass dict (auto-serialized)
+result = handle.append({"message": "hello"})
+print(f"Next offset: {result.next_offset}")
+
+# Or pre-serialize
+result = handle.append('{"message":"hello"}')
+
+# Byte stream
+result = handle.append(b"raw bytes")
+```
+
+<ParamField path="stream()" type="method">
+  Start a read session
+
+  <ParamField path="offset" type="Offset | None">
+    Starting offset
+  </ParamField>
+  <ParamField path="live" type="LiveMode" default="True">
+    Live mode
+  </ParamField>
+
+  Returns: `StreamResponse` (context manager)
+</ParamField>
+
+<ParamField path="close_stream()" type="method">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="data" type="bytes | str | Any | None">
+    Optional final message
+  </ParamField>
+
+  Returns: `CloseResult` with `final_offset`
+</ParamField>
+
+<ParamField path="head()" type="method">
+  Get stream metadata via HEAD request
+
+  Returns: `HeadResult` with `content_type`, `offset`, `stream_closed`
+</ParamField>
+
+<ParamField path="delete()" type="method">
+  Delete the stream
+</ParamField>
+
+### AsyncDurableStream
+
+Asynchronous handle class (same API as `DurableStream`, but async).
+
+```python
+import asyncio
+from durable_streams import AsyncDurableStream
+
+async def main():
+    handle = await AsyncDurableStream.create(
+        "https://streams.example.com/events",
+        content_type="application/json",
+    )
+
+    await handle.append({"message": "hello"})
+
+    async with handle.stream() as res:
+        async for event in res.iter_json():
+            print(event)
+
+asyncio.run(main())
+```
+
+### IdempotentProducer
+
+Exactly-once writes with automatic batching and pipelining.
+
+```python
+from durable_streams import IdempotentProducer
+import httpx
+
+async def main():
+    async with httpx.AsyncClient() as client:
+        producer = IdempotentProducer(
+            url="https://streams.example.com/orders",
+            producer_id="order-service-1",
+            client=client,
+            epoch=0,
+            auto_claim=True,
+            max_batch_bytes=1024 * 1024,
+            linger_ms=5,
+        )
+
+        # Fire-and-forget (returns immediately)
+        producer.append(b'{"orderId":"123"}')
+        producer.append(b'{"orderId":"456"}')
+
+        # Ensure delivery
+        await producer.flush()
+        await producer.close()
+```
+
+<ParamField path="__init__()" type="method">
+  Create an idempotent producer
+
+  <ParamField path="url" type="str" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="producer_id" type="str" required>
+    Stable identifier (e.g., "order-service-1")
+  </ParamField>
+  <ParamField path="client" type="httpx.AsyncClient | None">
+    HTTP client for connection reuse
+  </ParamField>
+  <ParamField path="epoch" type="int" default="0">
+    Starting epoch (increment on restart)
+  </ParamField>
+  <ParamField path="auto_claim" type="bool" default="False">
+    Auto-retry with epoch+1 on 403
+  </ParamField>
+  <ParamField path="max_batch_bytes" type="int" default="1048576">
+    Max batch size (1MB)
+  </ParamField>
+  <ParamField path="linger_ms" type="int" default="5">
+    Max wait before sending batch
+  </ParamField>
+  <ParamField path="max_in_flight" type="int" default="5">
+    Max concurrent batches
+  </ParamField>
+  <ParamField path="on_error" type="Callable[[Exception], None] | None">
+    Error callback
+  </ParamField>
+</ParamField>
+
+<ParamField path="append()" type="method">
+  Fire-and-forget append
+
+  <ParamField path="body" type="bytes | str" required>
+    Data to append (for JSON, pass pre-serialized JSON)
+  </ParamField>
+</ParamField>
+
+<ParamField path="flush()" type="async method">
+  Send pending batch and wait for all in-flight batches
+
+  Returns: `None`
+</ParamField>
+
+<ParamField path="close_stream()" type="async method">
+  Close the stream with producer headers (idempotent)
+
+  <ParamField path="data" type="str | bytes | None">
+    Optional final message
+  </ParamField>
+
+  Returns: `IdempotentAppendResult`
+</ParamField>
+
+## Types
+
+### Offset
+
+```python
+Offset = str  # e.g., "-1" for start, "123_456" for position
+```
+
+### LiveMode
+
+```python
+LiveMode = Literal[False, True, "long-poll", "sse"]
+# False: catch-up only
+# True: auto-select mode
+# "long-poll": explicit long-polling
+# "sse": explicit Server-Sent Events
+```
+
+### HeadersLike / ParamsLike
+
+```python
+HeadersLike = dict[str, str | Callable[[], str]]
+ParamsLike = dict[str, str | Callable[[], str]]
+```
+
+## Error Handling
+
+```python
+from durable_streams import (
+    DurableStreamError,
+    StreamNotFoundError,
+    StreamClosedError,
+    SeqConflictError,
+)
+
+try:
+    handle.append(data)
+except StreamClosedError as e:
+    print(f"Stream closed: {e.url}")
+except SeqConflictError:
+    print("Sequence conflict")
+except DurableStreamError as e:
+    print(f"Error {e.code}: {e}")
+```
+
+### Exception Hierarchy
+
+- `DurableStreamError` - Base exception
+  - `StreamNotFoundError` - 404
+  - `StreamExistsError` - 409 on create
+  - `StreamClosedError` - 409 with Stream-Closed header
+  - `SeqConflictError` - 409 sequence conflict
+  - `RetentionGoneError` - 410 offset expired
+  - `SSENotSupportedError` - Server doesn't support SSE
+
+## Advanced Features
+
+### Connection Pooling
+
+```python
+import httpx
+from durable_streams import DurableStream
+
+with httpx.Client(timeout=30.0) as client:
+    stream1 = DurableStream("https://.../stream1", client=client)
+    stream2 = DurableStream("https://.../stream2", client=client)
+    # Reuses connections
+```
+
+### Dynamic Headers
+
+```python
+from durable_streams import stream
+
+def get_token():
+    return "Bearer " + fetch_current_token()
+
+with stream(
+    "https://...",
+    headers={
+        "Authorization": get_token,  # Called per-request
+        "X-Request-ID": lambda: str(uuid.uuid4()),
+    },
+) as res:
+    for item in res.iter_json():
+        print(item)
+```
+
+### Type Annotations
+
+```python
+from typing import TypedDict
+from durable_streams import stream
+
+class Event(TypedDict):
+    id: str
+    type: str
+    data: dict
+
+with stream("https://...") as res:
+    for event in res.iter_json():
+        event: Event  # Type hint for IDE
+        print(event["id"])
+```
+
+## Testing
+
+The package includes a testing module:
+
+```python
+from durable_streams.testing import InMemoryStreamServer
+
+server = InMemoryStreamServer()
+handle = DurableStream(server.url("/test"))
+handle.create_stream(content_type="application/json")
+handle.append({"test": "data"})
+```
+
+## Source Code
+
+Source: [packages/client-py/src/durable_streams/](/source/packages/client-py/src/durable_streams/__init__.py)

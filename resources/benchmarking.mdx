@@ -1,0 +1,679 @@
+---
+title: Benchmarking
+description: Performance benchmark suites for measuring latency, throughput, and streaming performance of Durable Streams implementations
+---
+
+Durable Streams provides comprehensive benchmarking tools to measure and validate the performance of your server and client implementations.
+
+## Overview
+
+Two benchmark suites are available:
+
+- **Server Benchmarks** (`@durable-streams/benchmarks`) - Performance tests for server implementations
+- **Client Benchmarks** (via `@durable-streams/client-conformance-tests`) - Cross-language client performance testing
+
+## Server Benchmarks
+
+The server benchmark suite uses Vitest to measure latency, message throughput, and byte throughput.
+
+### Installation
+
+```bash
+npm install @durable-streams/benchmarks
+```
+
+### Running Benchmarks
+
+```typescript
+import { runBenchmarks } from "@durable-streams/benchmarks"
+
+// Run all benchmarks against your server
+runBenchmarks({
+  baseUrl: "http://localhost:4437",
+  environment: "production", // optional: "local", "staging", etc.
+})
+```
+
+### Benchmark Categories
+
+#### 1. Latency Benchmarks
+
+Measure round-trip time for individual operations:
+
+**Baseline Ping** (packages/benchmarks/src/index.ts:127-138)
+```typescript
+bench(
+  `baseline ping (round-trip network latency)`,
+  async () => {
+    const startTime = performance.now()
+    await fetch(`${baseUrl}/health`)
+    const endTime = performance.now()
+
+    const pingTime = endTime - startTime
+    recordResult(`Baseline Ping`, pingTime, `ms`)
+  },
+  { iterations: 5, time: 5000 }
+)
+```
+
+**Append and Receive via Long-Poll** (packages/benchmarks/src/index.ts:140-214)
+```typescript
+bench(
+  `append and receive via long-poll (100 bytes)`,
+  async () => {
+    const streamPath = `/v1/stream/latency-bench-${Date.now()}-${Math.random()}`
+    const stream = await DurableStream.create({
+      url: `${baseUrl}${streamPath}`,
+      contentType: `application/octet-stream`,
+    })
+
+    const message = new Uint8Array(100).fill(42)
+    let offset = (await stream.head()).offset
+
+    // Measure baseline ping
+    const pingStart = performance.now()
+    await fetch(`${baseUrl}/health`)
+    const pingEnd = performance.now()
+    const pingTime = pingEnd - pingStart
+
+    // Start long-poll read
+    const readPromise = (async () => {
+      const res = await stream.stream({
+        offset,
+        live: `long-poll`,
+      })
+      await new Promise<void>((resolve) => {
+        const unsubscribe = res.subscribeBytes((chunk) => {
+          if (chunk.data.length > 0) {
+            unsubscribe()
+            res.cancel()
+            resolve()
+          }
+          return Promise.resolve()
+        })
+      })
+    })()
+
+    // Measure total round-trip time
+    const startTime = performance.now()
+    await stream.append(message)
+    await readPromise
+    const endTime = performance.now()
+
+    const totalLatency = endTime - startTime
+    const overhead = totalLatency - pingTime
+
+    recordResult(`Latency - Total RTT`, totalLatency, `ms`)
+    recordResult(`Latency - Overhead`, overhead, `ms`)
+  },
+  { iterations: 10, time: 15000 }
+)
+```
+
+**Success Criteria**: Latency overhead < 10ms round-trip
+
+#### 2. Message Throughput Benchmarks
+
+Measure messages per second at different message sizes:
+
+**Small Messages (100 bytes)** (packages/benchmarks/src/index.ts:226-262)
+```typescript
+bench(
+  `small messages (100 bytes)`,
+  async () => {
+    const streamPath = `/v1/stream/msg-small-${Date.now()}-${Math.random()}`
+    const stream = await DurableStream.create({
+      url: `${baseUrl}${streamPath}`,
+      contentType: `application/octet-stream`,
+    })
+
+    const message = new Uint8Array(100).fill(42)
+    const messageCount = 1000
+    const concurrency = 75
+
+    const startTime = performance.now()
+
+    // Send messages in batches with concurrency
+    for (let batch = 0; batch < messageCount / concurrency; batch++) {
+      await Promise.all(
+        Array.from({ length: concurrency }, () => stream.append(message))
+      )
+    }
+
+    const endTime = performance.now()
+    const elapsedSeconds = (endTime - startTime) / 1000
+    const messagesPerSecond = messageCount / elapsedSeconds
+
+    recordResult(
+      `Throughput - Small Messages`,
+      messagesPerSecond,
+      `msg/sec`
+    )
+  },
+  { iterations: 3, time: 10000 }
+)
+```
+
+**Large Messages (1MB)** (packages/benchmarks/src/index.ts:264-300)
+```typescript
+bench(
+  `large messages (1MB)`,
+  async () => {
+    const message = new Uint8Array(1024 * 1024).fill(42) // 1MB
+    const messageCount = 50
+    const concurrency = 15
+
+    const startTime = performance.now()
+
+    for (let batch = 0; batch < messageCount / concurrency; batch++) {
+      await Promise.all(
+        Array.from({ length: concurrency }, () => stream.append(message))
+      )
+    }
+
+    const endTime = performance.now()
+    const elapsedSeconds = (endTime - startTime) / 1000
+    const messagesPerSecond = messageCount / elapsedSeconds
+
+    recordResult(
+      `Throughput - Large Messages`,
+      messagesPerSecond,
+      `msg/sec`
+    )
+  },
+  { iterations: 2, time: 10000 }
+)
+```
+
+**Success Criteria**:
+- Small messages: 100+ messages/second
+- Large messages: Sustained throughput at scale
+
+#### 3. Byte Throughput Benchmarks
+
+Measure MB/s for streaming operations (packages/benchmarks/src/index.ts:311-363):
+
+```typescript
+bench(
+  `streaming throughput - appendStream`,
+  async () => {
+    const chunkSize = 64 * 1024 // 64KB chunks
+    const chunk = new Uint8Array(chunkSize).fill(42)
+    const totalChunks = 100 // ~6.4MB total
+
+    const startTime = performance.now()
+
+    const appends = []
+    for (let i = 0; i < totalChunks; i++) {
+      appends.push(stream.append(chunk))
+    }
+    await Promise.all(appends)
+
+    const endTime = performance.now()
+
+    // Read back to verify
+    let bytesRead = 0
+    const readRes = await stream.stream({ live: false })
+    const reader = readRes.bodyStream().getReader()
+    let result = await reader.read()
+    while (!result.done) {
+      bytesRead += result.value.length
+      result = await reader.read()
+    }
+
+    const elapsedSeconds = (endTime - startTime) / 1000
+    const mbPerSecond = bytesRead / (1024 * 1024) / elapsedSeconds
+
+    recordResult(
+      `Throughput - Streaming (appendStream)`,
+      mbPerSecond,
+      `MB/sec`
+    )
+  },
+  { iterations: 3, time: 10000 }
+)
+```
+
+**Success Criteria**: 100 MB/s for large message streaming
+
+### Output Format
+
+Benchmark results are saved to `benchmark-results.json`:
+
+```json
+{
+  "environment": "production",
+  "baseUrl": "http://localhost:4437",
+  "timestamp": "2026-03-02T12:34:56.789Z",
+  "results": {
+    "Baseline Ping": {
+      "min": 1.23,
+      "max": 5.67,
+      "mean": 2.45,
+      "p50": 2.34,
+      "p75": 3.12,
+      "p99": 4.89,
+      "unit": "ms",
+      "iterations": 5
+    },
+    "Latency - Total RTT": {
+      "min": 8.91,
+      "max": 45.23,
+      "mean": 15.67,
+      "p50": 14.23,
+      "p75": 18.45,
+      "p99": 38.12,
+      "unit": "ms",
+      "iterations": 10
+    },
+    "Throughput - Small Messages": {
+      "min": 1234.56,
+      "max": 1567.89,
+      "mean": 1401.23,
+      "p50": 1398.45,
+      "p75": 1456.78,
+      "p99": 1545.67,
+      "unit": "msg/sec",
+      "iterations": 3
+    }
+  }
+}
+```
+
+Console output shows a summary table:
+
+```
+=== BENCHMARK RESULTS ===
+Environment: production
+Base URL: http://localhost:4437
+
+┌─────────────────────────────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────────┐
+│                                 │   Min    │   Max    │   Mean   │   P50    │   P75    │   P99    │ Iterations │
+├─────────────────────────────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼────────────┤
+│ Baseline Ping                   │ 1.23 ms  │ 5.67 ms  │ 2.45 ms  │ 2.34 ms  │ 3.12 ms  │ 4.89 ms  │     5      │
+│ Latency - Total RTT             │ 8.91 ms  │ 45.23 ms │ 15.67 ms │ 14.23 ms │ 18.45 ms │ 38.12 ms │     10     │
+│ Latency - Overhead              │ 7.68 ms  │ 39.56 ms │ 13.22 ms │ 11.89 ms │ 15.33 ms │ 33.23 ms │     10     │
+│ Throughput - Small Messages     │ 1234.56  │ 1567.89  │ 1401.23  │ 1398.45  │ 1456.78  │ 1545.67  │     3      │
+│                                 │  msg/sec │  msg/sec │  msg/sec │  msg/sec │  msg/sec │  msg/sec │            │
+└─────────────────────────────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴────────────┘
+```
+
+## Client Benchmarks
+
+The client conformance test suite includes a benchmark mode for cross-language performance testing.
+
+### Running Client Benchmarks
+
+```bash
+# Benchmark TypeScript client
+npx @durable-streams/client-conformance-tests --bench ts
+
+# Benchmark Python client
+npx @durable-streams/client-conformance-tests --bench ./client-py/adapter.py
+
+# Benchmark Go client
+npx @durable-streams/client-conformance-tests --bench ./client-go/adapter
+```
+
+### Benchmark Options
+
+```bash
+# Run only latency benchmarks
+npx @durable-streams/client-conformance-tests --bench ts --category latency
+
+# Run only throughput benchmarks
+npx @durable-streams/client-conformance-tests --bench ts --category throughput
+
+# Run only streaming benchmarks
+npx @durable-streams/client-conformance-tests --bench ts --category streaming
+
+# Run specific scenario
+npx @durable-streams/client-conformance-tests --bench ts --scenario latency-append
+
+# Output as JSON for CI
+npx @durable-streams/client-conformance-tests --bench ts --format json
+
+# Output as Markdown table
+npx @durable-streams/client-conformance-tests --bench ts --format markdown
+```
+
+### Benchmark Scenarios
+
+Defined in packages/client-conformance-tests/src/benchmark-scenarios.ts:
+
+#### Latency Scenarios
+
+**Append Latency** (packages/client-conformance-tests/src/benchmark-scenarios.ts:77-100)
+```typescript
+export const appendLatencyScenario: BenchmarkScenario = {
+  id: `latency-append`,
+  name: `Append Latency`,
+  description: `Measure time to complete a single append operation`,
+  category: `latency`,
+  config: {
+    warmupIterations: 10,
+    measureIterations: 100,
+    messageSize: 100, // 100 bytes
+  },
+  criteria: {
+    maxP50Ms: 20,
+    maxP99Ms: 100,
+  },
+  createOperation: (ctx) => ({
+    op: `append`,
+    path: `${ctx.basePath}/stream`,
+    size: 100,
+  }),
+}
+```
+
+**Read Latency** (packages/client-conformance-tests/src/benchmark-scenarios.ts:102-125)
+```typescript
+export const readLatencyScenario: BenchmarkScenario = {
+  id: `latency-read`,
+  name: `Read Latency`,
+  description: `Measure time to complete a single read operation`,
+  category: `latency`,
+  config: {
+    warmupIterations: 10,
+    measureIterations: 100,
+    messageSize: 100,
+  },
+  criteria: {
+    maxP50Ms: 20,
+    maxP99Ms: 100,
+  },
+}
+```
+
+**Roundtrip Latency** (packages/client-conformance-tests/src/benchmark-scenarios.ts:127-148)
+```typescript
+export const roundtripLatencyScenario: BenchmarkScenario = {
+  id: `latency-roundtrip`,
+  name: `Roundtrip Latency`,
+  description: `Measure time to append and immediately read back via long-poll`,
+  category: `latency`,
+  requires: [`longPoll`],
+  config: {
+    warmupIterations: 5,
+    measureIterations: 50,
+    messageSize: 100,
+  },
+  criteria: {
+    maxP50Ms: 50,
+    maxP99Ms: 200,
+  },
+}
+```
+
+**Create Latency** (packages/client-conformance-tests/src/benchmark-scenarios.ts:150-169)
+```typescript
+export const createLatencyScenario: BenchmarkScenario = {
+  id: `latency-create`,
+  name: `Create Latency`,
+  description: `Measure time to create a new stream`,
+  category: `latency`,
+  config: {
+    warmupIterations: 5,
+    measureIterations: 50,
+    messageSize: 0,
+  },
+  criteria: {
+    maxP50Ms: 30,
+    maxP99Ms: 150,
+  },
+}
+```
+
+#### Throughput Scenarios
+
+**Small Message Throughput** (packages/client-conformance-tests/src/benchmark-scenarios.ts:175-197)
+```typescript
+export const smallMessageThroughputScenario: BenchmarkScenario = {
+  id: `throughput-small-messages`,
+  name: `Small Message Throughput`,
+  description: `Measure throughput for 100-byte messages at high concurrency`,
+  category: `throughput`,
+  requires: [`batching`],
+  config: {
+    warmupIterations: 2,
+    measureIterations: 10,
+    messageSize: 100,
+    concurrency: 200,
+  },
+  criteria: {
+    minOpsPerSecond: 1000,
+  },
+  createOperation: (ctx) => ({
+    op: `throughput_append`,
+    path: `${ctx.basePath}/throughput-small`,
+    count: 100000,
+    size: 100,
+    concurrency: 200,
+  }),
+}
+```
+
+**Large Message Throughput** (packages/client-conformance-tests/src/benchmark-scenarios.ts:199-221)
+```typescript
+export const largeMessageThroughputScenario: BenchmarkScenario = {
+  id: `throughput-large-messages`,
+  name: `Large Message Throughput`,
+  description: `Measure throughput for 1MB messages`,
+  category: `throughput`,
+  requires: [`batching`],
+  config: {
+    warmupIterations: 1,
+    measureIterations: 5,
+    messageSize: 1024 * 1024, // 1MB
+    concurrency: 10,
+  },
+  criteria: {
+    minOpsPerSecond: 20,
+  },
+}
+```
+
+**Read Throughput** (packages/client-conformance-tests/src/benchmark-scenarios.ts:223-246)
+```typescript
+export const readThroughputScenario: BenchmarkScenario = {
+  id: `throughput-read`,
+  name: `Read Throughput`,
+  description: `Measure JSON parsing and iteration speed reading back messages`,
+  category: `throughput`,
+  config: {
+    warmupIterations: 1,
+    measureIterations: 5,
+    messageSize: 100, // ~100 bytes per JSON message
+  },
+  criteria: {
+    minMBPerSecond: 3,
+  },
+  setup: (ctx) => {
+    // Expecting 100000 JSON messages to be pre-populated
+    ctx.setupData.expectedCount = 100000
+    return Promise.resolve({ data: { expectedCount: 100000 } })
+  },
+}
+```
+
+#### Streaming Scenarios
+
+**SSE First Event Latency** (packages/client-conformance-tests/src/benchmark-scenarios.ts:252-274)
+```typescript
+export const sseLatencyScenario: BenchmarkScenario = {
+  id: `streaming-sse-latency`,
+  name: `SSE First Event Latency`,
+  description: `Measure time to receive first event via SSE`,
+  category: `streaming`,
+  requires: [`sse`],
+  config: {
+    warmupIterations: 3,
+    measureIterations: 20,
+    messageSize: 100,
+  },
+  criteria: {
+    maxP50Ms: 100,
+    maxP99Ms: 500,
+  },
+  createOperation: (ctx) => ({
+    op: `roundtrip`,
+    path: `${ctx.basePath}/sse-latency-${ctx.iteration}`,
+    size: 100,
+    live: `sse`,
+    contentType: `application/json`,
+  }),
+}
+```
+
+### Aggregating Results
+
+Aggregate benchmark results from multiple runs:
+
+```bash
+# Run benchmarks for each client and save results
+npx @durable-streams/client-conformance-tests --bench ts --format json > results/typescript.json
+npx @durable-streams/client-conformance-tests --bench ./python-adapter --format json > results/python.json
+npx @durable-streams/client-conformance-tests --bench ./go-adapter --format json > results/go.json
+
+# Aggregate all results
+npx @durable-streams/client-conformance-tests --report ./results
+```
+
+This generates a comparison table across all clients:
+
+```markdown
+## Benchmark Results
+
+### Latency (ms)
+
+| Scenario        | TypeScript P50 | Python P50 | Go P50 | TypeScript P99 | Python P99 | Go P99 |
+|-----------------|----------------|------------|--------|----------------|------------|--------|
+| Append          | 12.3           | 18.5       | 9.8    | 45.6           | 78.9       | 34.2   |
+| Read            | 10.5           | 15.2       | 8.3    | 38.7           | 65.4       | 28.9   |
+| Roundtrip       | 25.8           | 42.3       | 21.4   | 89.2           | 145.7      | 67.8   |
+
+### Throughput (ops/sec)
+
+| Scenario        | TypeScript | Python | Go    |
+|-----------------|------------|--------|-------|
+| Small Messages  | 1234       | 876    | 2345  |
+| Large Messages  | 45         | 32     | 67    |
+```
+
+## CI Integration
+
+Example GitHub Actions workflow for benchmarking:
+
+```yaml
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Run server benchmarks
+        run: |
+          npm run start:server &
+          npx wait-on http://localhost:4437
+          cd packages/benchmarks
+          npm run bench
+
+      - name: Run client benchmarks
+        run: |
+          npx @durable-streams/client-conformance-tests --bench ts --format json > benchmark-results-ts.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |.
+            benchmark-results.json
+            benchmark-results-ts.json
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('benchmark-results.json', 'utf8'));
+            // Format and post comment with results
+```
+
+## Performance Targets
+
+### Latency
+
+- **Baseline ping**: < 5ms (network)
+- **Append latency P50**: < 20ms
+- **Append latency P99**: < 100ms
+- **Read latency P50**: < 20ms
+- **Read latency P99**: < 100ms
+- **Roundtrip P50**: < 50ms (including network)
+- **Roundtrip P99**: < 200ms
+
+### Throughput
+
+- **Small messages** (100 bytes): 1000+ ops/sec
+- **Large messages** (1MB): 20+ ops/sec
+- **Byte throughput**: 100+ MB/sec
+
+### Streaming
+
+- **SSE first event P50**: < 100ms
+- **SSE first event P99**: < 500ms
+- **Long-poll response time**: < 50ms after data available
+
+## Interpreting Results
+
+### Latency Analysis
+
+- **P50 (median)**: Typical performance under normal conditions
+- **P99**: Worst-case performance for 99% of operations
+- **Overhead**: Protocol overhead beyond network latency
+
+**Good**: P99 < 2x P50 (consistent performance)
+**Warning**: P99 > 3x P50 (investigate outliers)
+
+### Throughput Analysis
+
+- **Small messages**: Tests protocol overhead and concurrency handling
+- **Large messages**: Tests network and I/O efficiency
+- **Read throughput**: Tests parsing and iteration speed
+
+### Comparing Implementations
+
+- **Client vs Client**: Language runtime overhead
+- **Before vs After**: Regression detection
+- **Local vs Production**: Infrastructure impact
+
+## Best Practices
+
+1. **Run benchmarks in consistent environments** (same hardware, network)
+2. **Use warmup iterations** to avoid JIT compilation and cache effects
+3. **Run multiple iterations** for statistical significance
+4. **Baseline against network latency** to isolate protocol overhead
+5. **Monitor P99, not just average** to catch tail latencies
+6. **Track results over time** to detect regressions
+7. **Compare against success criteria** to validate performance goals
+
+## Related Resources
+
+- [Conformance Tests](/resources/conformance-tests) - Protocol compliance testing
+- [Server Implementation Guide](/servers/overview) - Building performant servers
+- [Client Libraries](/clients/overview) - Client SDK documentation
+- [Protocol Specification](/protocol/specification) - Protocol details

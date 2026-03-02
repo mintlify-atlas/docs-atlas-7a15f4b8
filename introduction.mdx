@@ -1,0 +1,394 @@
+---
+title: Introduction to Durable Streams
+description: The open protocol for real-time sync to client applications
+---
+
+# Welcome to Durable Streams
+
+HTTP-based durable streams for streaming data reliably to web browsers, mobile apps, and native clients with offset-based resumability.
+
+Durable Streams provides a simple, production-proven protocol for creating and consuming ordered, replayable data streams with support for catch-up reads and live tailing.
+
+<Info>
+  Read the [Announcing Durable Streams](https://electric-sql.com/blog/2025/12/09/announcing-durable-streams) post on the Electric blog.
+</Info>
+
+## The Missing Primitive
+
+Modern applications frequently need ordered, durable sequences of data that can be replayed from arbitrary points and tailed in real time. Common patterns include:
+
+<CardGroup cols={2}>
+  <Card title="AI Conversation Streaming" icon="comments">
+    Stream LLM token responses with resume capability across reconnections
+  </Card>
+  <Card title="Agentic Apps" icon="robot">
+    Stream tool outputs and progress events with replay and clean reconnect semantics
+  </Card>
+  <Card title="Database Synchronization" icon="database">
+    Stream database changes to web, mobile, and native clients
+  </Card>
+  <Card title="Collaborative Editing" icon="users">
+    Sync CRDTs and operational transforms across devices
+  </Card>
+  <Card title="Real-time Updates" icon="bolt">
+    Push application state to clients with guaranteed delivery
+  </Card>
+  <Card title="Event Sourcing" icon="clock-rotate-left">
+    Build event-sourced architectures with client-side replay
+  </Card>
+</CardGroup>
+
+While durable streams exist throughout backend infrastructure (database WALs, Kafka topics, event stores), they aren't available as a first-class primitive for client applications. There's no simple, HTTP-based durable stream that sits alongside databases and object storage as a standard cloud primitive.
+
+## Why Durable Streams?
+
+WebSocket and SSE connections are easy to start, but they're fragile in practice: tabs get suspended, networks flap, devices switch, pages refresh. When that happens, you either lose in-flight data or build a bespoke backend storage and client resume protocol on top.
+
+AI products make this painfully visible. Token streaming is the UI for chat and copilots, and agentic apps stream progress events, tool outputs, and partial results over long-running sessions. When the stream fails, the product fails—even if the model did the right thing.
+
+**Durable Streams addresses this gap.** It's a minimal HTTP-based protocol for durable, offset-based streaming designed for client applications across all platforms: web browsers, mobile apps, native clients, IoT devices, and edge workers.
+
+Based on 1.5 years of production use at [Electric](https://electric-sql.com/) for real-time Postgres sync, reliably delivering millions of state changes every day.
+
+## What You Get
+
+<CardGroup cols={2}>
+  <Card title="Refresh-Safe" icon="arrows-rotate">
+    Users refresh the page, switch tabs, or background the app—they pick up exactly where they left off
+  </Card>
+  <Card title="Share Links" icon="share-nodes">
+    A stream is a URL. Multiple viewers can watch the same stream together in real-time
+  </Card>
+  <Card title="Never Re-run" icon="circle-check">
+    Don't repeat expensive work because a client disconnected mid-stream
+  </Card>
+  <Card title="Multi-Device" icon="mobile-screen">
+    Start on your phone, continue on your laptop, watch from a shared link—all in sync
+  </Card>
+  <Card title="Multi-Tab" icon="window-restore">
+    Works seamlessly across browser tabs without duplicating connections or missing data
+  </Card>
+  <Card title="Massive Fan-out" icon="diagram-project">
+    CDN-friendly design means one origin can serve millions of concurrent viewers
+  </Card>
+</CardGroup>
+
+## Protocol Features
+
+The protocol is:
+
+- **Universal**: Works anywhere HTTP works: web browsers, mobile apps, native clients, IoT devices, edge workers
+- **Simple**: Built on standard HTTP with no custom protocols
+- **Resumable**: Offset-based reads let you resume from any point
+- **Real-time**: Long-poll and SSE modes for live tailing with catch-up from any offset
+- **Economical**: HTTP-native design leverages CDN infrastructure for efficient scaling
+- **Flexible**: Content-type agnostic byte streams
+- **Composable**: Build higher-level abstractions on top (like Electric's real-time Postgres sync engine)
+
+## Quick Example
+
+Here's a complete example showing how to create a stream, write data, and read it back:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+// Create a stream
+const stream = await DurableStream.create({
+  url: "https://your-server.com/v1/stream/my-stream",
+  contentType: "application/json",
+})
+
+// Create an idempotent producer for reliable writes
+const producer = new IdempotentProducer(stream, "my-service-1", {
+  autoClaim: true,
+  onError: (err) => console.error("Batch failed:", err),
+})
+
+// High-throughput writes - fire-and-forget
+for (const event of events) {
+  producer.append(JSON.stringify(event))
+}
+
+// Ensure all messages are delivered
+await producer.flush()
+await producer.close()
+
+// Read with the streaming API
+const res = await stream.stream<{ event: string; userId: string }>()
+res.subscribeJson(async (batch) => {
+  for (const item of batch.items) {
+    console.log(item)
+  }
+})
+```
+
+```python Python
+from durable_streams import AsyncDurableStream, IdempotentProducer
+import json
+
+# Create a stream
+stream = await AsyncDurableStream.create(
+    "https://your-server.com/v1/stream/my-stream",
+    content_type="application/json",
+)
+
+# Create an idempotent producer
+producer = IdempotentProducer(
+    stream,
+    producer_id="my-service-1",
+    auto_claim=True,
+    on_error=lambda err: print(f"Batch failed: {err}"),
+)
+
+# High-throughput writes
+for event in events:
+    producer.append_nowait(json.dumps(event))
+
+# Ensure delivery
+await producer.flush()
+await producer.close()
+
+# Read the stream
+async with stream.stream() as res:
+    async for item in res.iter_json():
+        print(item)
+```
+
+```go Go
+import (
+    durable "github.com/durable-streams/durable-streams/packages/client-go"
+    "context"
+)
+
+// Create a stream
+stream, err := durable.CreateStream(ctx, durable.CreateOptions{
+    URL:         "https://your-server.com/v1/stream/my-stream",
+    ContentType: "application/json",
+})
+if err != nil {
+    panic(err)
+}
+
+// Write data
+err = stream.Append(ctx, `{"event":"user.created","userId":"123"}`)
+if err != nil {
+    panic(err)
+}
+
+// Read the stream
+iter := stream.Read(ctx)
+for iter.Next() {
+    fmt.Println(string(iter.Data()))
+}
+if err := iter.Err(); err != nil {
+    panic(err)
+}
+```
+
+</CodeGroup>
+
+## Architecture Overview
+
+Durable Streams sits between your application server and clients, providing durable log semantics over HTTP:
+
+```
+Application Server → Durable Streams → Clients (Web/Mobile/Native)
+  (shapes data,        (server-to-client)
+   authorizes)
+```
+
+Your application server:
+- Consumes from backend streaming systems (Kafka, RabbitMQ, etc.)
+- Applies authorization logic
+- Shapes data for specific clients
+- Fans out via Durable Streams
+
+Durable Streams provides:
+- **Persistent storage**: Data survives disconnections and server restarts
+- **Offset-based resumption**: Resume from any position with well-defined semantics
+- **Unified catch-up and live**: Same API for historical replay and real-time tailing
+- **Multi-reader support**: Multiple clients can subscribe to the same stream
+- **CDN-friendly**: Offset-based URLs enable aggressive caching
+- **Stateless servers**: Clients track their own offsets
+
+## Core Operations
+
+The protocol defines simple HTTP-based operations:
+
+<Steps>
+  <Step title="Create a Stream">
+    Use `PUT` to create a new stream with optional initial content
+
+    ```bash
+    curl -X PUT https://your-server.com/v1/stream/my-stream \
+      -H "Content-Type: application/json"
+    ```
+  </Step>
+
+  <Step title="Append Data">
+    Use `POST` to append bytes to a stream
+
+    ```bash
+    curl -X POST https://your-server.com/v1/stream/my-stream \
+      -H "Content-Type: application/json" \
+      -d '{"event":"user.created","userId":"123"}'
+    ```
+  </Step>
+
+  <Step title="Read from Offset">
+    Use `GET` with an offset to read from any position
+
+    ```bash
+    curl "https://your-server.com/v1/stream/my-stream?offset=-1"
+    ```
+  </Step>
+
+  <Step title="Live Tail">
+    Add `live=long-poll` or `live=sse` for real-time updates
+
+    ```bash
+    curl "https://your-server.com/v1/stream/my-stream?offset=abc123&live=long-poll"
+    ```
+  </Step>
+</Steps>
+
+## Key Concepts
+
+### Offsets
+
+Offsets are opaque tokens that identify positions within a stream:
+
+- **Opaque strings**: Treat as black boxes; don't parse or construct them
+- **Lexicographically sortable**: You can compare offsets to determine ordering
+- **`"-1"` means start**: Use `offset: "-1"` to read from the beginning
+- **`"now"` means tail**: Use `offset: "now"` to skip existing data and read only new data
+- **Server-generated**: Always use the `offset` value returned in responses
+
+### Message Framing
+
+<Tabs>
+  <Tab title="Byte Stream Mode">
+    By default, Durable Streams is a raw byte stream with no message boundaries. You must implement your own framing:
+
+    ```typescript
+    // Write with newlines (NDJSON)
+    await handle.append(JSON.stringify({ event: "user.created" }) + "\n")
+    await handle.append(JSON.stringify({ event: "user.updated" }) + "\n")
+
+    // Parse line by line
+    const res = await handle.stream({ live: false })
+    const text = await res.text()
+    const messages = text.split("\n").filter(Boolean).map(JSON.parse)
+    ```
+  </Tab>
+
+  <Tab title="JSON Mode">
+    Streams created with `contentType: "application/json"` preserve message boundaries:
+
+    ```typescript
+    // Create a JSON-mode stream
+    const handle = await DurableStream.create({
+      url: "https://your-server.com/v1/stream/my-stream",
+      contentType: "application/json",
+    })
+
+    // Append individual JSON values
+    await handle.append({ event: "user.created", userId: "123" })
+    await handle.append({ event: "user.updated", userId: "123" })
+
+    // Stream individual JSON messages
+    const res = await handle.stream({ live: false })
+    for await (const message of res.jsonStream()) {
+      console.log(message)
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Use Cases
+
+### AI Conversation Streaming
+
+LLM inference is expensive. When a user's tab gets suspended or they refresh the page, you don't want to re-run the generation—you want them to pick up exactly where they left off.
+
+```typescript
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+// Server: stream tokens to a durable stream
+const stream = await DurableStream.create({
+  url: `https://your-server.com/v1/stream/generation/${generationId}`,
+  contentType: "text/plain",
+})
+
+const producer = new IdempotentProducer(stream, generationId, {
+  autoClaim: true,
+  lingerMs: 10,
+})
+
+for await (const token of llm.stream(prompt)) {
+  producer.append(token)
+}
+await producer.flush()
+await producer.close()
+
+// Client: resume from last seen position (refresh-safe)
+const res = await stream.stream({ offset: lastSeenOffset, live: "auto" })
+res.subscribe((chunk) => {
+  renderTokens(chunk.data)
+  saveOffset(chunk.offset)
+})
+```
+
+### Database Sync
+
+Stream database changes to web and mobile clients for real-time synchronization:
+
+```typescript
+// Server: stream database changes
+for (const change of db.changes()) {
+  await handle.append(change)
+}
+
+// Client: receive and apply changes
+const res = await handle.stream({ offset: lastSeenOffset, live: "auto" })
+res.subscribeJson(async (batch) => {
+  for (const change of batch.items) {
+    applyChange(change)
+  }
+  saveOffset(batch.offset)
+})
+```
+
+### Event Sourcing
+
+Build event-sourced systems with durable event logs:
+
+```typescript
+// Append events
+await handle.append({ type: "OrderCreated", orderId: "123" })
+await handle.append({ type: "OrderPaid", orderId: "123" })
+
+// Replay from beginning
+const res = await handle.stream({ offset: "-1", live: false })
+const events = await res.json()
+const state = events.reduce(applyEvent, initialState)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get up and running in 5 minutes with our quick start guide
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install client libraries for your language and set up the server
+  </Card>
+  <Card title="Protocol Specification" icon="file-code" href="https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md">
+    Read the complete protocol specification
+  </Card>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/durable-streams/durable-streams">
+    View the source code and contribute
+  </Card>
+</CardGroup>

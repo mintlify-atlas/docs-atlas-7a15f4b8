@@ -1,0 +1,418 @@
+---
+title: Resumable Streaming
+description: Build resilient applications with offset-based resumability and exactly-once delivery
+---
+
+One of Durable Streams' core features is offset-based resumability. Your application can resume reading from exactly where it left off, even after page refreshes, network failures, or crashes.
+
+## Understanding Offsets
+
+Every read operation returns an offset representing your position in the stream:
+
+```typescript
+const res = await stream.stream({ 
+  offset: "-1",  // Start from beginning
+  live: false,
+})
+
+const items = await res.json()
+
+// Save this offset to resume later
+const currentOffset = res.offset
+console.log("Current position:", currentOffset)
+```
+
+<Info>
+Offsets are opaque strings (e.g., `"42_1024"`) containing internal state. Always save and use the exact offset value returned by the server—never construct or modify offsets manually.
+</Info>
+
+## Saving and Resuming
+
+<Steps>
+  <Step title="Save offset after processing">
+    Store the offset after successfully processing each batch:
+
+    ```typescript
+    const res = await stream.stream({ live: false })
+    const items = await res.json()
+
+    // Process items
+    for (const item of items) {
+      await processItem(item)
+    }
+
+    // Save offset for next read
+    localStorage.setItem("stream-offset", res.offset)
+    ```
+  </Step>
+
+  <Step title="Resume from saved offset">
+    On restart, load the saved offset and continue:
+
+    ```typescript
+    const savedOffset = localStorage.getItem("stream-offset") ?? "-1"
+
+    const res = await stream.stream({ 
+      offset: savedOffset,
+      live: false,
+    })
+
+    // Only new data since saved offset
+    const newItems = await res.json()
+    ```
+  </Step>
+
+  <Step title="Update offset incrementally">
+    For live streams, update the offset continuously:
+
+    ```typescript
+    const res = await stream.stream({ 
+      offset: savedOffset,
+      live: "long-poll",
+    })
+
+    res.subscribeJson(async (batch) => {
+      for (const item of batch.items) {
+        await processItem(item)
+      }
+      
+      // Update offset after each batch
+      localStorage.setItem("stream-offset", batch.offset)
+    })
+    ```
+  </Step>
+</Steps>
+
+## Resumability Patterns
+
+### Pattern 1: Checkpoint on Batch Boundaries
+
+Process and checkpoint data in batches for efficiency:
+
+```typescript
+async function consumeStream(
+  stream: DurableStream,
+  startOffset: string
+) {
+  const res = await stream.stream({
+    offset: startOffset,
+    live: "long-poll",
+  })
+
+  res.subscribeJson(async (batch) => {
+    // Process entire batch
+    const results = await Promise.all(
+      batch.items.map(item => processItem(item))
+    )
+
+    // Checkpoint only after successful batch processing
+    await saveCheckpoint({
+      offset: batch.offset,
+      processedAt: new Date(),
+      itemCount: batch.items.length,
+    })
+  })
+}
+```
+
+<Tip>
+Checkpointing on batch boundaries reduces I/O overhead and ensures you never reprocess the same batch unnecessarily.
+</Tip>
+
+### Pattern 2: Multi-tab Coordination
+
+Share a single offset across browser tabs using shared storage:
+
+```typescript
+import { DurableStream } from "@durable-streams/client"
+
+class SharedStreamConsumer {
+  private stream: DurableStream
+  private storageKey: string
+
+  constructor(url: string, storageKey: string) {
+    this.stream = new DurableStream({ url })
+    this.storageKey = storageKey
+
+    // Listen for offset updates from other tabs
+    window.addEventListener("storage", (e) => {
+      if (e.key === this.storageKey && e.newValue) {
+        console.log("Offset updated by another tab:", e.newValue)
+      }
+    })
+  }
+
+  async start() {
+    const savedOffset = localStorage.getItem(this.storageKey) ?? "-1"
+
+    const res = await this.stream.stream({
+      offset: savedOffset,
+      live: "long-poll",
+    })
+
+    res.subscribeJson(async (batch) => {
+      for (const item of batch.items) {
+        await this.processItem(item)
+      }
+
+      // Updates are automatically visible to other tabs
+      localStorage.setItem(this.storageKey, batch.offset)
+    })
+  }
+
+  private async processItem(item: any) {
+    // Your processing logic
+  }
+}
+```
+
+### Pattern 3: Database-backed Checkpoints
+
+For server-side consumers, persist offsets to a database:
+
+```typescript
+import { DurableStream } from "@durable-streams/client"
+import { db } from "./database"
+
+async function consumeStreamWithDBCheckpoint(
+  streamId: string,
+  consumerId: string
+) {
+  // Load last checkpoint from database
+  const checkpoint = await db.checkpoints.findOne({
+    streamId,
+    consumerId,
+  })
+
+  const startOffset = checkpoint?.offset ?? "-1"
+
+  const stream = new DurableStream({
+    url: `https://streams.example.com/v1/stream/${streamId}`,
+  })
+
+  const res = await stream.stream({
+    offset: startOffset,
+    live: "long-poll",
+  })
+
+  res.subscribeJson(async (batch) => {
+    // Process items within a transaction
+    await db.transaction(async (tx) => {
+      // Insert processed items
+      for (const item of batch.items) {
+        await tx.processedItems.insert({
+          streamId,
+          data: item,
+          processedAt: new Date(),
+        })
+      }
+
+      // Update checkpoint atomically
+      await tx.checkpoints.upsert({
+        streamId,
+        consumerId,
+        offset: batch.offset,
+        updatedAt: new Date(),
+      })
+    })
+  })
+}
+```
+
+<Warning>
+Always update the checkpoint within the same transaction as processing the data to ensure exactly-once semantics.
+</Warning>
+
+## Exactly-Once Delivery with Idempotent Producers
+
+For write-side resumability, use `IdempotentProducer` to guarantee exactly-once delivery:
+
+```typescript
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+const stream = await DurableStream.create({
+  url: "https://streams.example.com/v1/stream/orders",
+  contentType: "application/json",
+})
+
+const producer = new IdempotentProducer(stream, "order-service-1", {
+  epoch: 0,
+  autoClaim: true, // Automatically handle epoch conflicts
+  onError: (err) => console.error("Write failed:", err),
+})
+
+// Fire-and-forget writes (synchronous, returns immediately)
+for (const order of orders) {
+  producer.append(JSON.stringify(order))
+}
+
+// Ensure all messages are delivered
+await producer.flush()
+```
+
+<Info>
+The producer uses `(producerId, epoch, seq)` headers to deduplicate writes. If the producer crashes and restarts, retried writes are automatically detected and ignored by the server.
+</Info>
+
+### How It Works
+
+<Steps>
+  <Step title="Producer identifies itself">
+    Each producer has a unique ID (e.g., `"order-service-1"`):
+
+    ```typescript
+    const producer = new IdempotentProducer(
+      stream, 
+      "order-service-1",  // Stable producer ID
+      { epoch: 0 }
+    )
+    ```
+  </Step>
+
+  <Step title="Sequence numbers ensure order">
+    Each batch gets a monotonic sequence number:
+
+    ```http
+    POST /v1/stream/orders
+    Producer-Id: order-service-1
+    Producer-Epoch: 0
+    Producer-Seq: 42
+    ```
+  </Step>
+
+  <Step title="Server deduplicates retries">
+    If the same `(producerId, epoch, seq)` arrives twice, the server returns 204 No Content without duplicating data:
+
+    ```typescript
+    // First attempt: 200 OK - data written
+    // Retry after crash: 204 No Content - deduplicated
+    ```
+  </Step>
+
+  <Step title="Epochs fence zombies">
+    When restarting a producer, increment the epoch to fence old instances:
+
+    ```typescript
+    // Old producer (crashed)
+    const oldProducer = new IdempotentProducer(stream, "worker-1", { epoch: 0 })
+
+    // New producer (after restart)
+    const newProducer = new IdempotentProducer(stream, "worker-1", { epoch: 1 })
+    
+    // Old producer's retries now fail with 403 Forbidden
+    ```
+  </Step>
+</Steps>
+
+## Handling Network Interruptions
+
+Durable Streams automatically handles transient failures with exponential backoff:
+
+```typescript
+const res = await stream.stream({
+  offset: savedOffset,
+  live: "long-poll",
+  backoffOptions: {
+    maxRetries: 10,
+    initialDelayMs: 100,
+    maxDelayMs: 30000,
+    backoffMultiplier: 2,
+  },
+})
+```
+
+For custom retry logic, use the `onError` callback:
+
+```typescript
+const res = await stream.stream({
+  offset: savedOffset,
+  live: "long-poll",
+  onError: async (error) => {
+    if (error instanceof FetchError && error.status === 401) {
+      // Refresh auth token
+      const newToken = await refreshAuthToken()
+      
+      // Return new headers to retry with
+      return {
+        headers: { Authorization: `Bearer ${newToken}` },
+      }
+    }
+    
+    // Return undefined to stop retrying
+    return undefined
+  },
+})
+```
+
+<Tip>
+The `onError` handler is called before each retry. Return updated headers or params to retry with fresh credentials, or return `undefined` to abort.
+</Tip>
+
+## Cursor-based Caching
+
+Durable Streams includes cursor-based cache busting for CDN compatibility:
+
+```typescript
+const res = await stream.stream({ 
+  offset: "100_2048",
+  live: false,
+})
+
+// Response includes cursor for cache coordination
+const cursor = res.cursor
+```
+
+Cursors change when new data is written, ensuring CDN caches are invalidated:
+
+```http
+GET /v1/stream/my-stream?offset=100_2048&cursor=abc123
+Cache-Control: public, max-age=60
+Stream-Next-Cursor: def456
+```
+
+<Info>
+The client automatically manages cursors. You don't need to handle them explicitly unless building custom caching logic.
+</Info>
+
+## Testing Resumability
+
+Use these patterns to verify your application handles interruptions correctly:
+
+```typescript
+import { DurableStream } from "@durable-streams/client"
+
+describe("Stream resumability", () => {
+  it("resumes from saved offset after disconnect", async () => {
+    const stream = new DurableStream({
+      url: "https://streams.example.com/v1/stream/test",
+    })
+
+    // First read
+    const res1 = await stream.stream({ offset: "-1", live: false })
+    const items1 = await res1.json()
+    const offset1 = res1.offset
+
+    // Write more data
+    await stream.append(JSON.stringify({ new: "data" }))
+
+    // Resume from saved offset
+    const res2 = await stream.stream({ offset: offset1, live: false })
+    const items2 = await res2.json()
+
+    // Should only get new data
+    expect(items2).toHaveLength(1)
+    expect(items2[0]).toEqual({ new: "data" })
+  })
+})
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Real-time Subscriptions" icon="bolt" href="/guides/real-time-subscriptions">
+    Stream live updates with long-poll and SSE modes
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Implement robust error handling and retry logic
+  </Card>
+</CardGroup>

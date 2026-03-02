@@ -1,0 +1,350 @@
+---
+title: Protocol Headers
+description: Complete reference for all HTTP headers used in the Durable Streams protocol
+---
+
+The Durable Streams protocol uses custom HTTP headers prefixed with `Stream-` and `Producer-` to communicate stream metadata and control protocol behavior.
+
+## Request Headers
+
+Headers sent by clients in requests.
+
+### Content-Type
+
+<ParamField header="Content-Type" type="string">
+  Standard HTTP header specifying the MIME type of the request/response body.
+  
+  **For CREATE (PUT):** Sets the stream's content type. If omitted, the server may default to `application/octet-stream`. This content type is preserved for all future reads.
+  
+  **For APPEND (POST):** Must match the stream's existing content type when a body is provided. May be omitted when the request body is empty (close-only requests with `Stream-Closed: true`).
+  
+  **For READ (GET):** Not applicable for requests (used in responses).
+</ParamField>
+
+### Stream-TTL
+
+<ParamField header="Stream-TTL" type="integer">
+  Sets a relative time-to-live in seconds from creation. Only valid on CREATE (PUT) requests.
+  
+  **Format:** Must be a non-negative integer in decimal notation without leading zeros, plus signs, decimal points, or scientific notation.
+  
+  **Valid examples:** `3600`, `86400`, `0`
+  
+  **Invalid examples:** `+3600`, `03600`, `3600.0`, `3.6e3`
+  
+  **Conflict:** If both `Stream-TTL` and `Stream-Expires-At` are supplied, servers should reject the request with `400 Bad Request`.
+</ParamField>
+
+### Stream-Expires-At
+
+<ParamField header="Stream-Expires-At" type="string">
+  Sets an absolute expiry time as an RFC 3339 timestamp. Only valid on CREATE (PUT) requests.
+  
+  **Format:** RFC 3339 timestamp (e.g., `2025-01-15T12:00:00Z`)
+  
+  **Conflict:** If both `Stream-TTL` and `Stream-Expires-At` are supplied, servers should reject the request with `400 Bad Request`.
+</ParamField>
+
+### Stream-Closed
+
+<ParamField header="Stream-Closed" type="boolean">
+  Indicates or requests stream closure.
+  
+  **For CREATE (PUT):** When set to `true`, the stream is created in the closed state. Any body provided becomes the complete and final content of the stream. Enables atomic "create and close" semantics.
+  
+  **For APPEND (POST):** When set to `true`, the stream is closed after the append completes. This is an atomic operation: the body (if any) is appended as the final data, and the stream transitions to the closed state. If the request body is empty, the stream is closed without appending any data.
+  
+  **Value:** Uses the value `true` (case-insensitive) to indicate closure. Servers must treat the header as present only when its value is exactly `true`. Other values such as `false`, `yes`, `1`, or empty string must be treated as if the header were absent.
+  
+  **Idempotency:** Close-only requests (with empty body) are idempotent. If the stream is already closed and the request includes `Stream-Closed: true` with an empty body, servers should return `204 No Content` with `Stream-Closed: true`.
+</ParamField>
+
+### Stream-Seq
+
+<ParamField header="Stream-Seq" type="string">
+  A monotonic, lexicographic writer sequence number for coordination. Only valid on APPEND (POST) requests.
+  
+  **Format:** Opaque string that must compare using simple byte-wise lexicographic ordering.
+  
+  **Scope:** Sequence numbers are scoped per authenticated writer identity (or per stream, depending on implementation). Servers must document the scope they enforce.
+  
+  **Validation:** If provided and less than or equal to the last appended sequence (as determined by lexicographic comparison), the server must return `409 Conflict`. Sequence numbers must be strictly increasing.
+  
+  **Use case:** Application-layer ordering across producer restarts, separate from the transport-layer `Producer-Seq`.
+</ParamField>
+
+### Producer-Id
+
+<ParamField header="Producer-Id" type="string">
+  Client-supplied stable identifier for idempotent producers. Only valid on APPEND (POST) requests.
+  
+  **Format:** Non-empty string (e.g., `"order-service-1"`, UUID)
+  
+  **Requirements:** Must be provided together with `Producer-Epoch` and `Producer-Seq`. If only some producer headers are provided, servers must return `400 Bad Request`. Empty values result in `400 Bad Request`.
+  
+  **Purpose:** Identifies the logical producer across restarts for exactly-once write semantics.
+</ParamField>
+
+### Producer-Epoch
+
+<ParamField header="Producer-Epoch" type="integer">
+  Client-declared epoch for idempotent producers, starting at 0. Only valid on APPEND (POST) requests.
+  
+  **Format:** Non-negative integer ≤ 2^53-1 (for JavaScript interoperability)
+  
+  **Requirements:** Must be provided together with `Producer-Id` and `Producer-Seq`.
+  
+  **Semantics:** Increment on producer restart to establish a new session. Server validates that epoch is monotonically non-decreasing. New epochs must start with `Producer-Seq: 0`.
+  
+  **Fencing:** If epoch < state.epoch, server returns `403 Forbidden` with current epoch in response header (zombie fencing).
+</ParamField>
+
+### Producer-Seq
+
+<ParamField header="Producer-Seq" type="integer">
+  Monotonically increasing sequence number per epoch for idempotent producers. Only valid on APPEND (POST) requests.
+  
+  **Format:** Non-negative integer ≤ 2^53-1 (for JavaScript interoperability)
+  
+  **Requirements:** Must be provided together with `Producer-Id` and `Producer-Epoch`.
+  
+  **Semantics:** Starts at 0 for each new epoch. Applies per-batch (per HTTP request), not per-message.
+  
+  **Validation:**
+  - If seq &lt;= state.lastSeq: Return `204 No Content` (duplicate, idempotent success)
+  - If seq == state.lastSeq + 1: Accept and update state, return `200 OK`
+  - If seq &gt; state.lastSeq + 1: Return `409 Conflict` with `Producer-Expected-Seq` and `Producer-Received-Seq` headers (sequence gap)
+</ParamField>
+
+### Transfer-Encoding
+
+<ParamField header="Transfer-Encoding" type="string">
+  Standard HTTP header for streaming request bodies.
+  
+  **Value:** Set to `chunked` for streaming bodies on APPEND (POST) requests.
+  
+  **Support:** Servers should support HTTP/1.1 chunked encoding and HTTP/2 streaming semantics.
+</ParamField>
+
+---
+
+## Response Headers
+
+Headers sent by servers in responses.
+
+### Location
+
+<ParamField header="Location" type="string">
+  Standard HTTP header indicating the URI of a created resource.
+  
+  **Usage:** On CREATE (PUT) requests with `201 Created` response, servers should include a `Location` header equal to the stream URL.
+</ParamField>
+
+### Stream-Next-Offset
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The next offset to read from for subsequent requests.
+  
+  **Format:** Opaque, case-sensitive string. Lexicographically sortable. See the Offsets section for details.
+  
+  **Usage:** Returned on all successful CREATE (PUT), APPEND (POST), and READ (GET) operations. Also returned on HEAD requests to indicate the current tail offset.
+  
+  **Client behavior:** Clients must use the returned `Stream-Next-Offset` value for subsequent read requests to ensure exactly-once delivery.
+</ParamField>
+
+### Stream-Cursor
+
+<ParamField header="Stream-Cursor" type="string">
+  Cursor to echo on subsequent long-poll requests for CDN collapsing.
+  
+  **Usage:** 
+  - **Long-poll (GET with live=long-poll):** Servers must include this header on 200 OK responses. Servers must include this on 204 No Content responses when the stream is open. May be omitted when `Stream-Closed` is true.
+  - **Catch-up (GET without live):** Optional.
+  - **SSE (GET with live=sse):** Not used in HTTP headers; instead, included in control events as `streamCursor` field.
+  
+  **Format:** Opaque string generated by the server. Typically an interval number based on fixed time intervals (default: 20 seconds) counted from an epoch.
+  
+  **Purpose:** Enables CDNs and proxies to collapse multiple clients waiting for the same data into a single upstream request. Prevents infinite CDN cache loops.
+</ParamField>
+
+### Stream-Up-To-Date
+
+<ParamField header="Stream-Up-To-Date" type="boolean">
+  Indicates the client is caught up with all available data.
+  
+  **Value:** Must be `true` when the response includes all data available in the stream at the time the response was generated (when the requested offset has reached the tail and no more data exists).
+  
+  **Usage:** 
+  - **Catch-up (GET without live):** Should not be present when returning partial data due to server-defined chunk size limits.
+  - **Long-poll (GET with live=long-poll):** Must be included on 204 No Content responses.
+  - **SSE (GET with live=sse):** Not used in HTTP headers; instead, included in control events as `upToDate` field.
+  
+  **Important distinction:** `Stream-Up-To-Date: true` does NOT imply EOF. More data may be appended in the future. Only `Stream-Closed: true` indicates that no more data will ever arrive.
+</ParamField>
+
+### Stream-Closed
+
+<ParamField header="Stream-Closed" type="boolean">
+  Indicates the stream is in a closed state (terminal, no further appends permitted).
+  
+  **Usage:**
+  - **CREATE (PUT):** Present when the stream was created in the closed state.
+  - **APPEND (POST):** Present when the stream is now closed (either by this request or previously). On `409 Conflict` due to attempting to append to a closed stream, servers must return this header along with `Stream-Next-Offset`.
+  - **HEAD:** Present when the stream has been closed. Absence indicates the stream is still open.
+  - **READ (GET - catch-up):** Must be present when the stream is closed and the client has reached the final offset. Should not be present when returning partial data from a closed stream.
+  - **READ (GET - long-poll):** On `204 No Content` with `Stream-Closed: true`, indicates EOF.
+  - **READ (GET - SSE):** Not used in HTTP headers; instead, included in control events as `streamClosed` field.
+  
+  **Semantics:** 
+  - Stream closure is durable (persisted) and monotonic (once closed, cannot be reopened).
+  - Closing an already-closed stream succeeds (idempotent).
+  - Readers can detect closure and treat it as EOF.
+  
+  **EOF signaling:** The presence of `Stream-Closed` (or `streamClosed` in SSE) is the definitive EOF signal across all read modes.
+</ParamField>
+
+### Stream-TTL
+
+<ParamField header="Stream-TTL" type="integer">
+  Remaining time-to-live in seconds for the stream.
+  
+  **Usage:** Returned on HEAD requests if the stream has a TTL. Decreases over time.
+  
+  **Format:** Non-negative integer in seconds.
+</ParamField>
+
+### Stream-Expires-At
+
+<ParamField header="Stream-Expires-At" type="string">
+  Absolute expiry time for the stream.
+  
+  **Usage:** Returned on HEAD requests if the stream has an absolute expiry time.
+  
+  **Format:** RFC 3339 timestamp (e.g., `2025-01-15T12:00:00Z`)
+</ParamField>
+
+### Cache-Control
+
+<ParamField header="Cache-Control" type="string">
+  Standard HTTP header for caching directives.
+  
+  **For READ (GET):**
+  - **Shared streams:** `public, max-age=60, stale-while-revalidate=300`
+  - **User-specific streams:** `private, max-age=60, stale-while-revalidate=300`
+  
+  **For HEAD:** Servers should return `no-store` to avoid stale tail offsets and closure status. Alternative: `private, max-age=0, must-revalidate`.
+  
+  **Purpose:** Enables CDN/browser caching for catch-up reads while allowing stale content to be served during revalidation.
+</ParamField>
+
+### ETag
+
+<ParamField header="ETag" type="string">
+  Standard HTTP header for cache validation.
+  
+  **Format:** `{internal_stream_id}:{start_offset}:{end_offset}`
+  
+  **Usage:** Servers must generate `ETag` headers for GET responses, except for `offset=now` responses.
+  
+  **Validation:** Clients may use `If-None-Match` with the `ETag` value on repeat catch-up requests. When a client provides a valid `If-None-Match` header that matches the current ETag, servers must respond with `304 Not Modified` (with no body).
+  
+  **Stream closure:** ETags must vary with the stream's closure status. When a stream is closed (without new data being appended), the ETag must change to ensure clients do not receive `304 Not Modified` responses that would hide the closure signal. Implementations should include a closure indicator in the ETag format (e.g., appending `:c`).
+</ParamField>
+
+### Producer-Epoch
+
+<ParamField header="Producer-Epoch" type="integer">
+  Echoed back on success with idempotent producer headers.
+  
+  **Usage:** 
+  - On `200 OK` or `204 No Content`: Echoes the accepted epoch.
+  - On `403 Forbidden` (stale epoch): Returns the current server epoch for the producer ID.
+  
+  **Purpose:** Allows clients to discover the current epoch for auto-claim flows.
+</ParamField>
+
+### Producer-Seq
+
+<ParamField header="Producer-Seq" type="integer">
+  The highest accepted sequence number for this (stream, producerId, epoch) tuple.
+  
+  **Usage:** On success (`200 OK` or `204 No Content`) with idempotent producer headers.
+  
+  **Purpose:** Enables clients to confirm pipelined requests and recover state after crashes.
+</ParamField>
+
+### Producer-Expected-Seq
+
+<ParamField header="Producer-Expected-Seq" type="integer">
+  The expected sequence number when a sequence gap is detected.
+  
+  **Usage:** On `409 Conflict` due to sequence gap (when `Producer-Seq` provided is greater than state.lastSeq + 1).
+  
+  **Accompanied by:** `Producer-Received-Seq` header.
+</ParamField>
+
+### Producer-Received-Seq
+
+<ParamField header="Producer-Received-Seq" type="integer">
+  The received sequence number when a sequence gap is detected.
+  
+  **Usage:** On `409 Conflict` due to sequence gap.
+  
+  **Accompanied by:** `Producer-Expected-Seq` header.
+</ParamField>
+
+### Stream-SSE-Data-Encoding
+
+<ParamField header="Stream-SSE-Data-Encoding" type="string">
+  Indicates that SSE data events are base64-encoded.
+  
+  **Value:** `base64`
+  
+  **Usage:** When a stream's configured content-type is neither `text/*` nor `application/json`, servers must include this response header on SSE (GET with live=sse) requests.
+  
+  **Client behavior:** Clients must check for this header and decode data events accordingly. For binary streams in SSE mode, data events are automatically base64-encoded per RFC 4648.
+</ParamField>
+
+---
+
+## SSE Control Event Fields
+
+For SSE mode (GET with `live=sse`), metadata is communicated via `control` events instead of HTTP headers. Control events are JSON objects with camelCase field names.
+
+### streamNextOffset
+
+<ParamField field="streamNextOffset" type="string">
+  The next offset to read from for subsequent requests. Required in all control events.
+  
+  **Equivalent to:** `Stream-Next-Offset` HTTP header
+</ParamField>
+
+### streamCursor
+
+<ParamField field="streamCursor" type="string">
+  Cursor for reconnection. Required when the stream is open. May be omitted when `streamClosed` is true.
+  
+  **Equivalent to:** `Stream-Cursor` HTTP header
+  
+  **Purpose:** Enables CDN collapsing. Clients should use the last received `streamCursor` when reconnecting.
+</ParamField>
+
+### upToDate
+
+<ParamField field="upToDate" type="boolean">
+  Set to `true` when the client is caught up with all available data. Required when true.
+  
+  **Equivalent to:** `Stream-Up-To-Date` HTTP header
+  
+  **Note:** `streamClosed: true` implies `upToDate: true`, so `upToDate` may be omitted when `streamClosed` is true.
+</ParamField>
+
+### streamClosed
+
+<ParamField field="streamClosed" type="boolean">
+  Set to `true` when the stream is closed and all data up to the final offset has been sent. Required when true.
+  
+  **Equivalent to:** `Stream-Closed` HTTP header
+  
+  **Client behavior:** Clients receiving `streamClosed: true` must not attempt to reconnect, as no more data will arrive. Servers must close the SSE connection after emitting the final control event with `streamClosed: true`.
+</ParamField>

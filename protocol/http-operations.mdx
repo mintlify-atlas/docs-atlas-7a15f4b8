@@ -1,0 +1,543 @@
+---
+title: HTTP Operations
+description: Complete reference for all HTTP operations in the Durable Streams protocol
+---
+
+The Durable Streams protocol defines six core HTTP operations for interacting with streams. All operations are applied to a stream URL, and the protocol is defined by the HTTP methods, query parameters, and headers used.
+
+## Create Stream
+
+Creates a new stream at the specified URL.
+
+**Request:**
+
+```bash
+PUT {stream-url}
+```
+
+**Idempotent Behavior:**
+
+If the stream already exists, the server will:
+- Return `200 OK` if the existing stream's configuration (content type, TTL/expiry, and closure status) matches the request
+- Return `409 Conflict` if configuration does not match
+
+### Request Headers
+
+<ParamField header="Content-Type" type="string" optional>
+  Sets the stream's content type. If omitted, the server may default to `application/octet-stream`.
+</ParamField>
+
+<ParamField header="Stream-TTL" type="integer" optional>
+  Sets a relative time-to-live in seconds from creation. Must be a non-negative integer in decimal notation without leading zeros, plus signs, decimal points, or scientific notation (e.g., `3600` is valid; `+3600`, `03600`, `3600.0`, and `3.6e3` are not).
+</ParamField>
+
+<ParamField header="Stream-Expires-At" type="string" optional>
+  Sets an absolute expiry time as an RFC 3339 timestamp. If both `Stream-TTL` and `Stream-Expires-At` are supplied, servers should reject the request with `400 Bad Request`.
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean" optional>
+  When set to `true`, the stream is created in the closed state. Any body provided becomes the complete and final content of the stream. This enables atomic "create and close" semantics for single-message or empty streams.
+</ParamField>
+
+### Request Body
+
+Optional initial stream bytes. If provided, these bytes form the first content of the stream.
+
+### Response Codes
+
+- `201 Created`: Stream created successfully
+- `200 OK`: Stream already exists with matching configuration (idempotent success)
+- `409 Conflict`: Stream already exists with different configuration
+- `400 Bad Request`: Invalid headers or parameters
+- `429 Too Many Requests`: Rate limit exceeded
+
+### Response Headers
+
+<ParamField header="Location" type="string">
+  The stream URL (included on 201 Created)
+</ParamField>
+
+<ParamField header="Content-Type" type="string">
+  The stream's content type
+</ParamField>
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The tail offset after any initial content
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean">
+  Present when the stream was created in the closed state
+</ParamField>
+
+### Example
+
+```bash
+curl -X PUT https://your-server.com/v1/stream/my-stream \
+  -H "Content-Type: application/json" \
+  -H "Stream-TTL: 3600" \
+  -d '{"event":"user.created","userId":"123"}'
+```
+
+---
+
+## Append to Stream
+
+Appends bytes to the end of an existing stream.
+
+**Request:**
+
+```bash
+POST {stream-url}
+```
+
+Supports both full-body and streaming (chunked) append operations. Optionally closes the stream atomically with the append.
+
+### Request Headers
+
+<ParamField header="Content-Type" type="string" required>
+  Must match the stream's existing content type when a body is provided. May be omitted when the request body is empty (close-only requests with `Stream-Closed: true`).
+</ParamField>
+
+<ParamField header="Transfer-Encoding" type="string" optional>
+  Set to `chunked` for streaming bodies. Servers should support HTTP/1.1 chunked encoding and HTTP/2 streaming semantics.
+</ParamField>
+
+<ParamField header="Stream-Seq" type="string" optional>
+  A monotonic, lexicographic writer sequence number for coordination. If provided and less than or equal to the last appended sequence, the server returns `409 Conflict`. Sequence numbers must be strictly increasing.
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean" optional>
+  When set to `true`, the stream is closed after the append completes. This is an atomic operation: the body (if any) is appended as the final data, and the stream transitions to the closed state. Close-only requests (with empty body) are idempotent.
+</ParamField>
+
+<ParamField header="Producer-Id" type="string" optional>
+  Client-supplied stable identifier for idempotent producers (e.g., "order-service-1", UUID). Must be provided together with `Producer-Epoch` and `Producer-Seq`.
+</ParamField>
+
+<ParamField header="Producer-Epoch" type="integer" optional>
+  Client-declared epoch for idempotent producers, starting at 0. Increment on producer restart to establish a new session. Must be a non-negative integer ≤ 2^53-1.
+</ParamField>
+
+<ParamField header="Producer-Seq" type="integer" optional>
+  Monotonically increasing sequence number per epoch for idempotent producers. Starts at 0 for each new epoch. Must be a non-negative integer ≤ 2^53-1.
+</ParamField>
+
+### Request Body
+
+Bytes to append to the stream. Servers must reject POST requests with an empty body (Content-Length: 0 or no body) with `400 Bad Request`, unless the `Stream-Closed: true` header is present.
+
+### Response Codes
+
+- `204 No Content`: Append successful (or stream already closed when closing idempotently)
+- `200 OK`: Append successful with idempotent producer (new data)
+- `400 Bad Request`: Malformed request (invalid header syntax, missing Content-Type, empty body without `Stream-Closed: true`)
+- `404 Not Found`: Stream does not exist
+- `405 Method Not Allowed` or `501 Not Implemented`: Append not supported for this stream
+- `409 Conflict`: Content type mismatch, sequence regression, or stream is closed
+- `413 Payload Too Large`: Request body exceeds server limits
+- `429 Too Many Requests`: Rate limit exceeded
+- `403 Forbidden`: Stale producer epoch (with idempotent producer headers)
+
+### Response Headers
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The new tail offset after the append
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean">
+  Present when the stream is now closed (either by this request or previously)
+</ParamField>
+
+<ParamField header="Producer-Epoch" type="integer">
+  Echoed back on success with idempotent producer, or current server epoch on stale epoch (403)
+</ParamField>
+
+<ParamField header="Producer-Seq" type="integer">
+  On success with idempotent producer, the highest accepted sequence number for this (stream, producerId, epoch) tuple
+</ParamField>
+
+<ParamField header="Producer-Expected-Seq" type="integer">
+  On 409 Conflict (sequence gap), the expected sequence
+</ParamField>
+
+<ParamField header="Producer-Received-Seq" type="integer">
+  On 409 Conflict (sequence gap), the received sequence
+</ParamField>
+
+### Example
+
+```bash
+curl -X POST https://your-server.com/v1/stream/my-stream \
+  -H "Content-Type: application/json" \
+  -d '{"event":"user.updated","userId":"123"}'
+```
+
+### Idempotent Producer Example
+
+```bash
+curl -X POST https://your-server.com/v1/stream/my-stream \
+  -H "Content-Type: application/json" \
+  -H "Producer-Id: service-1" \
+  -H "Producer-Epoch: 0" \
+  -H "Producer-Seq: 0" \
+  -d '{"event":"order.created","orderId":"456"}'
+```
+
+---
+
+## Close Stream
+
+Closes a stream without appending data.
+
+**Request:**
+
+```bash
+POST {stream-url}
+Stream-Closed: true
+```
+
+### Response Codes
+
+- `204 No Content`: Stream closed successfully (or already closed—idempotent)
+- `404 Not Found`: Stream does not exist
+- `405 Method Not Allowed` or `501 Not Implemented`: Append/close not supported for this stream
+
+### Response Headers
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The tail offset (unchanged, since no data was appended)
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean">
+  Confirms the stream is now closed
+</ParamField>
+
+### Example
+
+```bash
+curl -X POST https://your-server.com/v1/stream/my-stream \
+  -H "Stream-Closed: true"
+```
+
+---
+
+## Delete Stream
+
+Deletes the stream and all its data.
+
+**Request:**
+
+```bash
+DELETE {stream-url}
+```
+
+### Response Codes
+
+- `204 No Content`: Stream deleted successfully
+- `404 Not Found`: Stream does not exist
+- `405 Method Not Allowed` or `501 Not Implemented`: Delete not supported for this stream
+
+### Example
+
+```bash
+curl -X DELETE https://your-server.com/v1/stream/my-stream
+```
+
+---
+
+## Stream Metadata
+
+Checks stream existence and returns metadata without transferring data.
+
+**Request:**
+
+```bash
+HEAD {stream-url}
+```
+
+This is the canonical way to find the tail offset, TTL, expiry information, and closure status.
+
+### Response Codes
+
+- `200 OK`: Stream exists
+- `404 Not Found`: Stream does not exist
+- `429 Too Many Requests`: Rate limit exceeded
+
+### Response Headers
+
+<ParamField header="Content-Type" type="string">
+  The stream's content type
+</ParamField>
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The tail offset (next offset after the current end)
+</ParamField>
+
+<ParamField header="Stream-TTL" type="integer" optional>
+  Remaining time-to-live in seconds, if applicable
+</ParamField>
+
+<ParamField header="Stream-Expires-At" type="string" optional>
+  Absolute expiry time as RFC 3339 timestamp, if applicable
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean" optional>
+  Present when the stream has been closed. Absence indicates the stream is still open.
+</ParamField>
+
+<ParamField header="Cache-Control" type="string">
+  Servers should return `no-store` to avoid stale tail offsets and closure status
+</ParamField>
+
+### Example
+
+```bash
+curl -I https://your-server.com/v1/stream/my-stream
+```
+
+---
+
+## Read Stream - Catch-up
+
+Returns bytes starting from the specified offset for historical replay.
+
+**Request:**
+
+```bash
+GET {stream-url}?offset=<offset>
+```
+
+### Query Parameters
+
+<ParamField query="offset" type="string" optional>
+  Start offset token. If omitted, defaults to the stream start (offset `-1`). Use `-1` to read from the beginning or `now` to start from the current tail.
+</ParamField>
+
+### Response Codes
+
+- `200 OK`: Data available (or empty body if offset equals tail)
+- `400 Bad Request`: Malformed offset or invalid parameters
+- `404 Not Found`: Stream does not exist
+- `410 Gone`: Offset is before the earliest retained position (retention/compaction)
+- `429 Too Many Requests`: Rate limit exceeded
+
+### Response Headers
+
+<ParamField header="Cache-Control" type="string">
+  Derived from TTL/expiry. For shared streams: `public, max-age=60, stale-while-revalidate=300`. For user-specific streams: `private, max-age=60, stale-while-revalidate=300`.
+</ParamField>
+
+<ParamField header="ETag" type="string">
+  Entity tag for cache validation, format: `{internal_stream_id}:{start_offset}:{end_offset}`
+</ParamField>
+
+<ParamField header="Stream-Cursor" type="string" optional>
+  Cursor to echo on subsequent long-poll requests for CDN collapsing. Optional for catch-up, required for live modes.
+</ParamField>
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The next offset to read from for subsequent requests
+</ParamField>
+
+<ParamField header="Stream-Up-To-Date" type="boolean">
+  Must be `true` when the response includes all data available in the stream at the time the response was generated. Should not be present when returning partial data due to server-defined chunk size limits.
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean">
+  Must be present when the stream is closed and the client has reached the final offset. Indicates EOF (end-of-file).
+</ParamField>
+
+### Response Body
+
+Bytes from the stream starting at the specified offset, up to a server-defined maximum chunk size.
+
+### Example
+
+```bash
+# Read from beginning
+curl "https://your-server.com/v1/stream/my-stream?offset=-1"
+
+# Resume from offset
+curl "https://your-server.com/v1/stream/my-stream?offset=abc123xyz"
+
+# Read from current tail (skip all existing data)
+curl "https://your-server.com/v1/stream/my-stream?offset=now"
+```
+
+---
+
+## Read Stream - Live (Long-poll)
+
+If no data is available at the specified offset, the server waits up to a timeout for new data to arrive.
+
+**Request:**
+
+```bash
+GET {stream-url}?offset=<offset>&live=long-poll[&cursor=<cursor>]
+```
+
+### Query Parameters
+
+<ParamField query="offset" type="string" required>
+  The offset to read from. Must be provided.
+</ParamField>
+
+<ParamField query="live" type="string" required>
+  Set to `long-poll` to indicate long-polling mode.
+</ParamField>
+
+<ParamField query="cursor" type="string" optional>
+  Echo of the last `Stream-Cursor` header value from a previous response. Used for collapsing keys in CDN/proxy configurations.
+</ParamField>
+
+### Response Codes
+
+- `200 OK`: Data became available within the timeout
+- `204 No Content`: Timeout expired with no new data
+- `400 Bad Request`: Invalid parameters
+- `404 Not Found`: Stream does not exist
+- `429 Too Many Requests`: Rate limit exceeded
+
+### Response Headers (on 200)
+
+<ParamField header="Stream-Cursor" type="string">
+  Servers must include this header for CDN collapsing
+</ParamField>
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The next offset to read from
+</ParamField>
+
+<ParamField header="Stream-Up-To-Date" type="boolean">
+  Indicates the client is caught up with all available data
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean">
+  Must be present when the stream is closed (EOF signal)
+</ParamField>
+
+### Response Headers (on 204)
+
+<ParamField header="Stream-Next-Offset" type="string">
+  The current tail offset
+</ParamField>
+
+<ParamField header="Stream-Up-To-Date" type="boolean">
+  Must be `true` to indicate the client is caught up
+</ParamField>
+
+<ParamField header="Stream-Cursor" type="string">
+  Must be included when the stream is open. May be omitted when `Stream-Closed` is true.
+</ParamField>
+
+<ParamField header="Stream-Closed" type="boolean">
+  Must be present when the stream is closed. A `204 No Content` with `Stream-Closed: true` indicates EOF.
+</ParamField>
+
+### Example
+
+```bash
+curl "https://your-server.com/v1/stream/my-stream?offset=abc123xyz&live=long-poll"
+```
+
+---
+
+## Read Stream - Live (SSE)
+
+Returns data as a Server-Sent Events (SSE) stream.
+
+**Request:**
+
+```bash
+GET {stream-url}?offset=<offset>&live=sse
+```
+
+### Query Parameters
+
+<ParamField query="offset" type="string" required>
+  The offset to start reading from
+</ParamField>
+
+<ParamField query="live" type="string" required>
+  Set to `sse` to indicate SSE streaming mode
+</ParamField>
+
+### Response Codes
+
+- `200 OK`: Streaming body (SSE format)
+- `400 Bad Request`: Invalid parameters
+- `404 Not Found`: Stream does not exist
+- `429 Too Many Requests`: Rate limit exceeded
+
+### Response Format
+
+Data is emitted in [Server-Sent Events format](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format). The response uses `Content-Type: text/event-stream`.
+
+For streams with content-type `text/*` or `application/json`, data events carry UTF-8 text directly. For all other content types (binary streams), servers automatically base64-encode data events and include the response header `Stream-SSE-Data-Encoding: base64`.
+
+**Events:**
+
+- `data`: Emitted for each batch of data. For binary streams, the payload is base64-encoded per RFC 4648. For JSON streams, implementations may batch multiple messages into a single SSE data event by streaming a JSON array across multiple `data:` lines.
+
+- `control`: Emitted after every data event. Format is a JSON object with camelCase field names:
+  - `streamNextOffset` (required): The next offset to read from
+  - `streamCursor` (required when stream is open): Cursor for reconnection. May be omitted when `streamClosed` is true.
+  - `upToDate` (required when true): Set to `true` when the client is caught up with all available data
+  - `streamClosed` (required when true): Set to `true` when the stream is closed and all data has been sent
+
+### SSE Event Examples
+
+**Normal data event:**
+
+```
+event: data
+data: [
+data: {"k":"v"},
+data: {"k":"w"},
+data: ]
+
+event: control
+data: {"streamNextOffset":"123456_789","streamCursor":"abc"}
+```
+
+**Final data with stream closure:**
+
+```
+event: data
+data: [
+data: {"k":"final"}
+data: ]
+
+event: control
+data: {"streamNextOffset":"123456_999","streamClosed":true}
+```
+
+**Binary stream with base64 encoding:**
+
+```
+event: data
+data: AQIDBAUG
+data: BwgJCg==
+
+event: control
+data: {"streamNextOffset":"123456_789","streamCursor":"abc"}
+```
+
+### Example
+
+```bash
+curl "https://your-server.com/v1/stream/my-stream?offset=-1&live=sse"
+```
+
+### Stream Closure Behavior
+
+When the stream is closed:
+- The final `control` event must include `streamClosed: true`
+- After emitting the final control event, servers must close the SSE connection
+- Clients receiving `streamClosed: true` must not attempt to reconnect
+
+### Connection Lifecycle
+
+- Server should close connections roughly every ~60 seconds to enable CDN collapsing
+- Client must reconnect using the last received `streamNextOffset` value from the control event
+- Client must not reconnect if the last control event included `streamClosed: true`

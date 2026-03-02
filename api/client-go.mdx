@@ -1,0 +1,569 @@
+---
+title: "Go Client"
+description: "API reference for the durablestreams Go library"
+---
+
+# Go Client
+
+The official Go client for Durable Streams protocol with iterator-based streaming.
+
+## Installation
+
+```bash
+go get github.com/durable-streams/durable-streams/packages/client-go
+```
+
+Requires Go 1.21+
+
+## Quick Start
+
+```go
+import (
+    durablestreams "github.com/durable-streams/durable-streams/packages/client-go"
+)
+
+func main() {
+    client := durablestreams.NewClient()
+    stream := client.Stream("https://streams.example.com/my-stream")
+
+    // Create stream
+    err := stream.Create(ctx, durablestreams.WithContentType("application/json"))
+
+    // Append data
+    result, err := stream.Append(ctx, []byte(`{"message":"hello"}`))
+    fmt.Println("Next offset:", result.NextOffset)
+
+    // Read with iterator
+    it := stream.Read(ctx, durablestreams.WithLive(durablestreams.LiveModeLongPoll))
+    defer it.Close()
+
+    for {
+        chunk, err := it.Next()
+        if errors.Is(err, durablestreams.Done) {
+            break
+        }
+        fmt.Printf("Got %d bytes\n", len(chunk.Data))
+    }
+}
+```
+
+## Core APIs
+
+### Client
+
+<ParamField path="NewClient()" type="function">
+  Create a new client with default settings
+
+  <ParamField path="options" type="...ClientOption">
+    Optional configuration
+  </ParamField>
+
+  Returns: `*Client`
+</ParamField>
+
+**Options:**
+
+```go
+client := durablestreams.NewClient(
+    durablestreams.WithBaseURL("https://streams.example.com"),
+    durablestreams.WithHTTPClient(httpClient),
+)
+```
+
+### Stream
+
+Handle to a durable stream for read/write operations.
+
+#### Stream Methods
+
+<ParamField path="Create()" type="method">
+  Create a new stream (idempotent)
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context for cancellation
+  </ParamField>
+  <ParamField path="opts" type="...CreateOption">
+    <ParamField path="WithContentType(string)" type="option">
+      Content type (e.g., `"application/json"`)
+    </ParamField>
+    <ParamField path="WithTTL(time.Duration)" type="option">
+      Time-to-live
+    </ParamField>
+    <ParamField path="WithExpiresAt(time.Time)" type="option">
+      Absolute expiry time
+    </ParamField>
+    <ParamField path="WithClosed(bool)" type="option">
+      Create in closed state
+    </ParamField>
+  </ParamField>
+
+  Returns: `error`
+</ParamField>
+
+<ParamField path="Append()" type="method">
+  Append data to the stream with automatic retries
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context for cancellation
+  </ParamField>
+  <ParamField path="data" type="[]byte" required>
+    Data to append (for JSON, pass pre-marshaled JSON)
+  </ParamField>
+  <ParamField path="opts" type="...AppendOption">
+    <ParamField path="WithSeq(string)" type="option">
+      Writer coordination sequence
+    </ParamField>
+    <ParamField path="WithHeaders(map[string]string)" type="option">
+      Additional headers
+    </ParamField>
+  </ParamField>
+
+  Returns: `(*AppendResult, error)`
+
+  <ResponseField name="AppendResult" type="struct">
+    <ResponseField name="NextOffset" type="Offset">
+      Stream offset after append
+    </ResponseField>
+    <ResponseField name="ETag" type="string">
+      ETag for conditional requests
+    </ResponseField>
+  </ResponseField>
+</ParamField>
+
+**Example:**
+
+```go
+// JSON stream
+data, _ := json.Marshal(map[string]string{"message": "hello"})
+result, err := stream.Append(ctx, data)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Offset:", result.NextOffset)
+
+// With sequence for coordination
+result, err = stream.Append(ctx, data, durablestreams.WithSeq("seq-001"))
+```
+
+<ParamField path="AppendJSON()" type="method">
+  Append JSON data (auto-marshals)
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context
+  </ParamField>
+  <ParamField path="v" type="any" required>
+    Value to marshal as JSON
+  </ParamField>
+  <ParamField path="opts" type="...AppendOption">
+    Append options
+  </ParamField>
+
+  Returns: `(*AppendResult, error)`
+</ParamField>
+
+**Example:**
+
+```go
+result, err := stream.AppendJSON(ctx, map[string]string{
+    "event": "order.created",
+    "orderId": "123",
+})
+```
+
+<ParamField path="Read()" type="method">
+  Create an iterator for reading stream chunks
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context for cancellation
+  </ParamField>
+  <ParamField path="opts" type="...ReadOption">
+    <ParamField path="WithOffset(Offset)" type="option">
+      Starting offset (default: `StartOffset` = "-1")
+    </ParamField>
+    <ParamField path="WithLive(LiveMode)" type="option">
+      Live mode: `LiveModeNone`, `LiveModeLongPoll`, `LiveModeSSE`
+    </ParamField>
+    <ParamField path="WithTimeout(time.Duration)" type="option">
+      Request timeout
+    </ParamField>
+    <ParamField path="WithHeaders(map[string]string)" type="option">
+      Additional headers
+    </ParamField>
+  </ParamField>
+
+  Returns: `*ChunkIterator`
+</ParamField>
+
+**Example:**
+
+```go
+it := stream.Read(ctx,
+    durablestreams.WithOffset(lastOffset),
+    durablestreams.WithLive(durablestreams.LiveModeLongPoll),
+)
+defer it.Close()
+
+for {
+    chunk, err := it.Next()
+    if errors.Is(err, durablestreams.Done) {
+        break
+    }
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Process chunk
+    fmt.Printf("Got %d bytes at offset %s\n", len(chunk.Data), chunk.Offset)
+
+    // Save checkpoint
+    saveOffset(chunk.Offset)
+}
+```
+
+<ParamField path="Close()" type="method">
+  Close the stream permanently (no more appends)
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context
+  </ParamField>
+  <ParamField path="opts" type="...CloseOption">
+    <ParamField path="WithCloseData([]byte)" type="option">
+      Optional final message
+    </ParamField>
+  </ParamField>
+
+  Returns: `(*CloseResult, error)`
+
+  <ResponseField name="CloseResult" type="struct">
+    <ResponseField name="FinalOffset" type="Offset">
+      Stream offset after close
+    </ResponseField>
+  </ResponseField>
+</ParamField>
+
+<ParamField path="Head()" type="method">
+  Get stream metadata via HEAD request
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context
+  </ParamField>
+
+  Returns: `(*Metadata, error)`
+
+  <ResponseField name="Metadata" type="struct">
+    <ResponseField name="ContentType" type="string">
+      Stream's MIME type
+    </ResponseField>
+    <ResponseField name="NextOffset" type="Offset">
+      Tail offset
+    </ResponseField>
+    <ResponseField name="StreamClosed" type="bool">
+      Whether stream is closed (EOF)
+    </ResponseField>
+    <ResponseField name="TTL" type="*time.Duration">
+      Remaining time-to-live
+    </ResponseField>
+  </ResponseField>
+</ParamField>
+
+<ParamField path="Delete()" type="method">
+  Delete the stream
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context
+  </ParamField>
+
+  Returns: `error`
+</ParamField>
+
+### ChunkIterator
+
+Iterator for reading stream chunks.
+
+<ParamField path="Next()" type="method">
+  Get the next chunk
+
+  Returns: `(*Chunk, error)`
+
+  Returns `durablestreams.Done` when iteration is complete.
+
+  <ResponseField name="Chunk" type="struct">
+    <ResponseField name="Data" type="[]byte">
+      Chunk data
+    </ResponseField>
+    <ResponseField name="Offset" type="Offset">
+      Offset after this chunk
+    </ResponseField>
+    <ResponseField name="UpToDate" type="bool">
+      Whether we've reached the current end
+    </ResponseField>
+    <ResponseField name="Cursor" type="string">
+      Stream cursor for CDN collapsing
+    </ResponseField>
+  </ResponseField>
+</ParamField>
+
+<ParamField path="Close()" type="method">
+  Close the iterator and release resources
+
+  Returns: `error`
+</ParamField>
+
+### JSONIterator
+
+Type-safe JSON iteration with Go generics.
+
+```go
+import "encoding/json"
+
+type Event struct {
+    ID   string `json:"id"`
+    Type string `json:"type"`
+}
+
+it := stream.Read(ctx)
+defer it.Close()
+
+jsonIt := durablestreams.NewJSONIterator[Event](it)
+for {
+    batch, err := jsonIt.Next()
+    if errors.Is(err, durablestreams.Done) {
+        break
+    }
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, event := range batch.Items {
+        fmt.Printf("Event %s: %s\n", event.ID, event.Type)
+    }
+
+    // Save checkpoint using batch offset
+    saveOffset(batch.Offset)
+}
+```
+
+### IdempotentProducer
+
+Exactly-once writes with automatic batching and pipelining.
+
+```go
+import durablestreams "github.com/durable-streams/durable-streams/packages/client-go"
+
+producer, err := client.IdempotentProducer(
+    "https://streams.example.com/orders",
+    "order-service-1",
+    durablestreams.IdempotentProducerConfig{
+        Epoch:         0,
+        AutoClaim:     true,
+        MaxBatchBytes: 1024 * 1024,
+        LingerMs:      5,
+        MaxInFlight:   5,
+    },
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer producer.Close()
+
+// Fire-and-forget writes
+producer.Append([]byte(`{"orderId":"123"}`))
+producer.Append([]byte(`{"orderId":"456"}`))
+
+// Ensure delivery
+if err := producer.Flush(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+<ParamField path="Client.IdempotentProducer()" type="method">
+  Create an idempotent producer
+
+  <ParamField path="url" type="string" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="producerID" type="string" required>
+    Stable identifier (e.g., "order-service-1")
+  </ParamField>
+  <ParamField path="config" type="IdempotentProducerConfig" required>
+    <ParamField path="Epoch" type="int" default="0">
+      Starting epoch (increment on restart)
+    </ParamField>
+    <ParamField path="AutoClaim" type="bool" default="false">
+      Auto-retry with epoch+1 on 403
+    </ParamField>
+    <ParamField path="MaxBatchBytes" type="int" default="1048576">
+      Max batch size (1MB)
+    </ParamField>
+    <ParamField path="LingerMs" type="int" default="5">
+      Max wait before sending batch
+    </ParamField>
+    <ParamField path="MaxInFlight" type="int" default="5">
+      Max concurrent batches
+    </ParamField>
+    <ParamField path="OnError" type="func(error)">
+      Error callback
+    </ParamField>
+  </ParamField>
+
+  Returns: `(*IdempotentProducer, error)`
+</ParamField>
+
+<ParamField path="Append()" type="method">
+  Fire-and-forget append (returns immediately)
+
+  <ParamField path="data" type="any" required>
+    Data to append ([]byte or string)
+  </ParamField>
+
+  Returns: `error`
+</ParamField>
+
+<ParamField path="Flush()" type="method">
+  Send pending batch and wait for all in-flight batches
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context for cancellation
+  </ParamField>
+
+  Returns: `error`
+</ParamField>
+
+<ParamField path="CloseStream()" type="method">
+  Close the stream with producer headers (idempotent)
+
+  <ParamField path="ctx" type="context.Context" required>
+    Context
+  </ParamField>
+  <ParamField path="data" type="[]byte">
+    Optional final message
+  </ParamField>
+
+  Returns: `(IdempotentAppendResult, error)`
+</ParamField>
+
+## Types
+
+### Offset
+
+```go
+type Offset string
+
+const (
+    StartOffset Offset = "-1" // Start of stream
+)
+
+// Create from string
+offset := Offset("123_456")
+
+// Check if start
+if offset.IsStart() {
+    // ...
+}
+```
+
+### LiveMode
+
+```go
+type LiveMode int
+
+const (
+    LiveModeNone     LiveMode = 0 // Catch-up only
+    LiveModeLongPoll LiveMode = 1 // Long-polling
+    LiveModeSSE      LiveMode = 2 // Server-Sent Events
+)
+```
+
+## Error Handling
+
+```go
+import (
+    durablestreams "github.com/durable-streams/durable-streams/packages/client-go"
+)
+
+result, err := stream.Append(ctx, data)
+if err != nil {
+    switch {
+    case errors.Is(err, durablestreams.ErrStreamNotFound):
+        // Handle 404
+    case errors.Is(err, durablestreams.ErrStreamClosed):
+        // Handle closed stream
+    case errors.Is(err, durablestreams.ErrSeqConflict):
+        // Handle sequence conflict
+    default:
+        log.Fatal(err)
+    }
+}
+```
+
+### Error Variables
+
+- `ErrStreamNotFound` - Stream doesn't exist (404)
+- `ErrStreamExists` - Stream already exists (409 on create)
+- `ErrStreamClosed` - Stream is closed (409 with Stream-Closed header)
+- `ErrSeqConflict` - Sequence conflict (409)
+- `ErrStaleEpoch` - Producer epoch is stale (403)
+- `ErrEmptyAppend` - Cannot append empty data
+- `Done` - Iterator exhausted
+
+## Advanced Features
+
+### Custom HTTP Client
+
+```go
+import (
+    "net/http"
+    "time"
+)
+
+httpClient := &http.Client{
+    Timeout: 30 * time.Second,
+    Transport: &http.Transport{
+        MaxIdleConns:        100,
+        MaxIdleConnsPerHost: 10,
+    },
+}
+
+client := durablestreams.NewClient(
+    durablestreams.WithHTTPClient(httpClient),
+)
+```
+
+### Retry Policy
+
+```go
+retryPolicy := durablestreams.RetryPolicy{
+    MaxRetries:     5,
+    InitialDelay:   100 * time.Millisecond,
+    MaxDelay:       5 * time.Second,
+    BackoffFactor:  2.0,
+    JitterFraction: 0.1,
+}
+
+client := durablestreams.NewClient(
+    durablestreams.WithRetryPolicy(retryPolicy),
+)
+```
+
+### Context Cancellation
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+it := stream.Read(ctx)
+defer it.Close()
+
+for {
+    chunk, err := it.Next()
+    if err == context.DeadlineExceeded {
+        fmt.Println("Timeout")
+        break
+    }
+    // ...
+}
+```
+
+## Source Code
+
+Source: [packages/client-go/](/source/packages/client-go/client.go)

@@ -1,0 +1,640 @@
+---
+title: "Caddy Server"
+description: "Production-ready Durable Streams server built as a Caddy v2 plugin with LMDB storage"
+---
+
+## Overview
+
+The Caddy server (`durable-streams-server`) is a production-ready implementation of the Durable Streams protocol built as a Caddy v2 plugin. It provides both in-memory and file-backed (LMDB) storage options.
+
+## Installation
+
+### Quick Install (Recommended)
+
+**macOS & Linux:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/durable-streams/durable-streams/main/packages/caddy-plugin/install.sh | sh
+```
+
+**Install specific version:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/durable-streams/durable-streams/main/packages/caddy-plugin/install.sh | sh -s v0.1.0
+```
+
+**Custom install directory:**
+
+```bash
+INSTALL_DIR=~/.local/bin curl -sSL https://raw.githubusercontent.com/durable-streams/durable-streams/main/packages/caddy-plugin/install.sh | sh
+```
+
+### Manual Download
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/durable-streams/durable-streams/releases):
+
+**macOS (Apple Silicon):**
+
+```bash
+curl -L https://github.com/durable-streams/durable-streams/releases/latest/download/durable-streams-server_<VERSION>_darwin_arm64.tar.gz | tar xz
+sudo mv durable-streams-server /usr/local/bin/
+```
+
+**macOS (Intel):**
+
+```bash
+curl -L https://github.com/durable-streams/durable-streams/releases/latest/download/durable-streams-server_<VERSION>_darwin_amd64.tar.gz | tar xz
+sudo mv durable-streams-server /usr/local/bin/
+```
+
+**Linux (x86_64):**
+
+```bash
+curl -L https://github.com/durable-streams/durable-streams/releases/latest/download/durable-streams-server_<VERSION>_linux_amd64.tar.gz | tar xz
+sudo mv durable-streams-server /usr/local/bin/
+```
+
+**Windows:**
+
+Download the `.zip` file from releases and extract to your PATH.
+
+### Build from Source
+
+```bash
+go build -o durable-streams-server ./cmd/caddy
+```
+
+## Quick Start
+
+### Dev Mode (Zero Config)
+
+Start the server with sensible defaults:
+
+```bash
+durable-streams-server dev
+```
+
+This starts the server with:
+- **URL**: http://localhost:4437
+- **Endpoint**: http://localhost:4437/v1/stream/*
+- **Storage**: In-memory (no persistence)
+- **Zero config**: No Caddyfile needed
+
+Perfect for development and testing!
+
+### Production Mode
+
+Create a `Caddyfile` for production with persistent storage:
+
+```caddyfile
+{
+	admin off
+}
+
+:4437 {
+	route /v1/stream/* {
+		durable_streams {
+			data_dir ./data
+		}
+	}
+}
+```
+
+Start the server:
+
+```bash
+durable-streams-server run --config Caddyfile
+```
+
+## Configuration
+
+The `durable_streams` Caddyfile directive accepts the following options:
+
+### Caddyfile Syntax
+
+```caddyfile
+durable_streams {
+	data_dir <directory>
+	max_file_handles <count>
+	long_poll_timeout <duration>
+	sse_reconnect_interval <duration>
+}
+```
+
+### Configuration Options
+
+<ParamField path="data_dir" type="string">
+  Directory for storing stream data. If empty, uses in-memory storage (for testing).
+
+  **Example:**
+  ```caddyfile
+  data_dir ./data
+  ```
+</ParamField>
+
+<ParamField path="max_file_handles" type="int" default="100">
+  Maximum number of open file handles to cache.
+
+  **Example:**
+  ```caddyfile
+  max_file_handles 200
+  ```
+</ParamField>
+
+<ParamField path="long_poll_timeout" type="duration" default="30s">
+  Default timeout for long-poll requests. Supports Caddy duration syntax (e.g., `30s`, `1m`, `500ms`).
+
+  **Example:**
+  ```caddyfile
+  long_poll_timeout 60s
+  ```
+</ParamField>
+
+<ParamField path="sse_reconnect_interval" type="duration" default="60s">
+  How often SSE connections should reconnect for CDN cache collapsing.
+
+  **Example:**
+  ```caddyfile
+  sse_reconnect_interval 120s
+  ```
+</ParamField>
+
+## Configuration Examples
+
+### In-Memory Mode (Default)
+
+For development and testing:
+
+```caddyfile
+:8787 {
+	route /v1/stream/* {
+		durable_streams
+	}
+}
+```
+
+### File-Backed Mode (LMDB)
+
+For production with persistent storage:
+
+```caddyfile
+:8787 {
+	route /v1/stream/* {
+		durable_streams {
+			data_dir ./data
+		}
+	}
+}
+```
+
+### Custom Timeouts
+
+```caddyfile
+:8787 {
+	route /v1/stream/* {
+		durable_streams {
+			data_dir ./data
+			long_poll_timeout 30s
+			sse_reconnect_interval 120s
+		}
+	}
+}
+```
+
+### With TLS
+
+```caddyfile
+example.com {
+	route /v1/stream/* {
+		durable_streams {
+			data_dir /var/lib/durable-streams
+			max_file_handles 500
+		}
+	}
+}
+```
+
+### Multiple Endpoints
+
+```caddyfile
+:8787 {
+	# Production streams
+	route /v1/stream/* {
+		durable_streams {
+			data_dir ./data/prod
+		}
+	}
+
+	# Test streams
+	route /test/stream/* {
+		durable_streams {
+			data_dir ./data/test
+		}
+	}
+}
+```
+
+## JSON Configuration
+
+The Caddy plugin can also be configured using JSON:
+
+```json
+{
+  "apps": {
+    "http": {
+      "servers": {
+        "srv0": {
+          "listen": [":4437"],
+          "routes": [
+            {
+              "match": [
+                {
+                  "path": ["/v1/stream/*"]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "durable_streams",
+                  "data_dir": "./data",
+                  "max_file_handles": 100,
+                  "long_poll_timeout": "30s",
+                  "sse_reconnect_interval": "60s"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+### JSON Configuration Fields
+
+<ParamField path="handler" type="string" required>
+  Must be `"durable_streams"` to use this plugin.
+</ParamField>
+
+<ParamField path="data_dir" type="string">
+  Directory for storing stream data. If empty, uses in-memory storage.
+</ParamField>
+
+<ParamField path="max_file_handles" type="int" default="100">
+  Maximum number of open file handles to cache.
+</ParamField>
+
+<ParamField path="long_poll_timeout" type="string" default="30s">
+  Default timeout for long-poll requests.
+</ParamField>
+
+<ParamField path="sse_reconnect_interval" type="string" default="60s">
+  How often SSE connections should reconnect.
+</ParamField>
+
+## Protocol Headers
+
+The server implements the following protocol headers:
+
+### Request Headers
+
+- `Content-Type` - Media type of the stream (required for POST/PUT)
+- `Stream-Seq` - Sequence number for write coordination
+- `Stream-TTL` - Time-to-live in seconds
+- `Stream-Expires-At` - Absolute expiry time (ISO 8601)
+- `Stream-Closed` - Close the stream ("true" to close)
+- `Producer-Id` - Producer ID for idempotent writes
+- `Producer-Epoch` - Producer epoch for idempotent writes
+- `Producer-Seq` - Producer sequence for idempotent writes
+- `If-None-Match` - ETag for conditional GET
+
+### Response Headers
+
+- `Stream-Next-Offset` - Offset after this operation
+- `Stream-Cursor` - Cache collision prevention cursor
+- `Stream-Up-To-Date` - Client is at stream tail ("true")
+- `Stream-Closed` - Stream is closed ("true")
+- `Stream-SSE-Data-Encoding` - SSE data encoding ("base64" for binary)
+- `Producer-Epoch` - Echoed producer epoch
+- `Producer-Seq` - Highest accepted producer sequence
+- `Producer-Expected-Seq` - Expected sequence (on gap)
+- `Producer-Received-Seq` - Received sequence (on gap)
+- `ETag` - Entity tag for caching
+- `Location` - New stream URL (on 201 Created)
+- `Cache-Control` - Caching directives
+
+## HTTP Methods
+
+### PUT - Create Stream
+
+Creates a new stream or returns existing stream if configuration matches.
+
+**Request:**
+```http
+PUT /v1/stream/my-stream HTTP/1.1
+Content-Type: application/json
+Stream-TTL: 3600
+```
+
+**Response:**
+```http
+HTTP/1.1 201 Created
+Location: http://localhost:4437/v1/stream/my-stream
+Stream-Next-Offset: 0_0
+```
+
+### HEAD - Get Metadata
+
+Returns stream metadata without body.
+
+**Request:**
+```http
+HEAD /v1/stream/my-stream HTTP/1.1
+```
+
+**Response:**
+```http
+HTTP/1.1 200 OK
+Stream-Next-Offset: 0_42
+Content-Type: application/json
+```
+
+### GET - Read Data
+
+Reads data from a stream starting at an offset.
+
+**Request:**
+```http
+GET /v1/stream/my-stream?offset=0_0 HTTP/1.1
+```
+
+**Response:**
+```http
+HTTP/1.1 200 OK
+Stream-Next-Offset: 0_42
+Content-Type: application/json
+
+[{"event":"test"}]
+```
+
+### POST - Append Data
+
+Appends data to a stream.
+
+**Request:**
+```http
+POST /v1/stream/my-stream HTTP/1.1
+Content-Type: application/json
+
+{"event":"test"}
+```
+
+**Response:**
+```http
+HTTP/1.1 204 No Content
+Stream-Next-Offset: 0_42
+```
+
+### DELETE - Delete Stream
+
+Deletes a stream and all its data.
+
+**Request:**
+```http
+DELETE /v1/stream/my-stream HTTP/1.1
+```
+
+**Response:**
+```http
+HTTP/1.1 204 No Content
+```
+
+## Live Modes
+
+### Long-Polling
+
+Wait for new messages with automatic timeout:
+
+```http
+GET /v1/stream/my-stream?offset=0_42&live=long-poll HTTP/1.1
+```
+
+Server waits up to `long_poll_timeout` for new messages. Returns 204 No Content on timeout.
+
+### Server-Sent Events (SSE)
+
+Real-time streaming with automatic reconnection:
+
+```http
+GET /v1/stream/my-stream?offset=0_0&live=sse HTTP/1.1
+```
+
+Server sends data and control events. Connection auto-closes after `sse_reconnect_interval`.
+
+## Storage Architecture
+
+### MemoryStore
+
+In-memory storage for development:
+- Fast, ephemeral storage
+- No persistence across restarts
+- No file I/O overhead
+
+### FileStore (LMDB)
+
+Production file-backed storage:
+- LMDB for metadata and producer state
+- Append-only log files for stream data
+- Configurable file handle pool
+- Crash-safe writes
+
+<Warning>
+  The file store does not atomically commit producer state with data appends. Data is written to segment files first, then producer state is updated in LMDB separately. If a crash occurs between these steps, producer state may be stale on recovery. See [issue #143](https://github.com/durable-streams/durable-streams/issues/143) for details.
+</Warning>
+
+## Development
+
+### Running Tests
+
+```bash
+# Go tests
+go test ./...
+
+# Conformance tests
+pnpm test:run
+```
+
+### Building
+
+```bash
+pnpm build
+# or
+go build -o caddy ./cmd/caddy
+```
+
+## Deployment
+
+### Systemd Service
+
+Create `/etc/systemd/system/durable-streams.service`:
+
+```ini
+[Unit]
+Description=Durable Streams Server
+After=network.target
+
+[Service]
+Type=simple
+User=durable-streams
+WorkingDirectory=/var/lib/durable-streams
+ExecStart=/usr/local/bin/durable-streams-server run --config /etc/durable-streams/Caddyfile
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl enable durable-streams
+sudo systemctl start durable-streams
+```
+
+### Docker
+
+```dockerfile
+FROM golang:1.21-alpine AS builder
+WORKDIR /build
+COPY . .
+RUN go build -o durable-streams-server ./cmd/caddy
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+COPY --from=builder /build/durable-streams-server /usr/local/bin/
+COPY Caddyfile /etc/Caddyfile
+EXPOSE 4437
+CMD ["durable-streams-server", "run", "--config", "/etc/Caddyfile"]
+```
+
+### Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: durable-streams
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: durable-streams
+  template:
+    metadata:
+      labels:
+        app: durable-streams
+    spec:
+      containers:
+      - name: server
+        image: durable-streams:latest
+        ports:
+        - containerPort: 4437
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: durable-streams-data
+```
+
+## Releasing
+
+Releases are automated via GoReleaser when a tag is pushed:
+
+```bash
+# Create and push a tag
+git tag caddy-v0.1.0
+git push origin caddy-v0.1.0
+```
+
+This will:
+1. Build binaries for all platforms
+2. Create GitHub release with artifacts
+3. Generate checksums
+4. Auto-generate changelog
+
+## Troubleshooting
+
+### Port Already in Use
+
+Change the port in your Caddyfile:
+
+```caddyfile
+:8787 {
+	# ...
+}
+```
+
+### Permission Denied (data_dir)
+
+Ensure the data directory is writable:
+
+```bash
+mkdir -p ./data
+chmod 755 ./data
+```
+
+### File Handle Limits
+
+Increase system limits for production:
+
+```bash
+ulimit -n 4096
+```
+
+Or in systemd service:
+
+```ini
+[Service]
+LimitNOFILE=4096
+```
+
+## Performance
+
+### Benchmarks
+
+Typical performance on modern hardware:
+
+- **Throughput**: 50,000+ requests/sec (in-memory)
+- **Latency**: &lt;1ms p50, &lt;5ms p99 (in-memory)
+- **Concurrent Streams**: 100,000+ (with file-backed storage)
+- **Long-Poll Connections**: 10,000+ concurrent
+
+### Tuning
+
+For high-throughput workloads:
+
+```caddyfile
+durable_streams {
+	data_dir ./data
+	max_file_handles 1000
+	long_poll_timeout 30s
+}
+```
+
+### Monitoring
+
+Enable Caddy's admin API for metrics:
+
+```caddyfile
+{
+	admin 0.0.0.0:2019
+}
+```
+
+Query metrics:
+
+```bash
+curl http://localhost:2019/metrics
+```

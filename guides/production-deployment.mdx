@@ -1,0 +1,610 @@
+---
+title: Production Deployment
+description: Deploy and scale Durable Streams in production with CDN support and monitoring
+---
+
+Durable Streams is designed for production use with CDN-friendly caching, persistent storage, and horizontal scaling capabilities.
+
+## Server Installation
+
+The production server is built as a Caddy plugin with optimized performance and file-backed storage.
+
+### Quick Install
+
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    # Install latest version
+    curl -sSL https://raw.githubusercontent.com/durable-streams/durable-streams/main/packages/caddy-plugin/install.sh | sh
+    
+    # Verify installation
+    durable-streams-server version
+    ```
+  </Tab>
+  <Tab title="Specific Version">
+    ```bash
+    # Install specific version
+    curl -sSL https://raw.githubusercontent.com/durable-streams/durable-streams/main/packages/caddy-plugin/install.sh | sh -s v0.1.0
+    ```
+  </Tab>
+  <Tab title="Custom Directory">
+    ```bash
+    # Install to custom directory
+    INSTALL_DIR=~/.local/bin curl -sSL https://raw.githubusercontent.com/durable-streams/durable-streams/main/packages/caddy-plugin/install.sh | sh
+    ```
+  </Tab>
+</Tabs>
+
+### Manual Download
+
+Download pre-built binaries from [GitHub Releases](https://github.com/durable-streams/durable-streams/releases):
+
+- **macOS (Apple Silicon)**: `durable-streams-server_<VERSION>_darwin_arm64.tar.gz`
+- **macOS (Intel)**: `durable-streams-server_<VERSION>_darwin_amd64.tar.gz`
+- **Linux (x86_64)**: `durable-streams-server_<VERSION>_linux_amd64.tar.gz`
+- **Linux (ARM64)**: `durable-streams-server_<VERSION>_linux_arm64.tar.gz`
+- **Windows**: `durable-streams-server_<VERSION>_windows_amd64.zip`
+
+## Configuration
+
+### Development Mode
+
+For quick testing without persistence:
+
+```bash
+durable-streams-server dev
+```
+
+This starts the server with:
+- URL: `http://localhost:4437`
+- Endpoint: `/v1/stream/*`
+- Storage: In-memory (ephemeral)
+- Zero configuration required
+
+<Warning>
+Development mode stores data in memory only. All data is lost when the server stops.
+</Warning>
+
+### Production Mode
+
+Create a `Caddyfile` for production deployment:
+
+```caddyfile
+{
+  admin off
+}
+
+:4437 {
+  route /v1/stream/* {
+    durable_streams {
+      data_dir ./data
+    }
+  }
+}
+```
+
+Start the server:
+
+```bash
+durable-streams-server run --config Caddyfile
+```
+
+<Info>
+With `data_dir` configured, streams are persisted to disk using LMDB. Data survives server restarts.
+</Info>
+
+### Advanced Configuration
+
+<CodeGroup>
+  ```caddyfile Custom Timeouts
+  :4437 {
+    route /v1/stream/* {
+      durable_streams {
+        data_dir ./data
+        long_poll_timeout 30s
+        sse_reconnect_interval 120s
+      }
+    }
+  }
+  ```
+
+  ```caddyfile HTTPS with Auto TLS
+  streams.example.com {
+    route /v1/stream/* {
+      durable_streams {
+        data_dir /var/lib/durable-streams
+      }
+    }
+  }
+  ```
+
+  ```caddyfile Behind Reverse Proxy
+  :8787 {
+    route /v1/stream/* {
+      durable_streams {
+        data_dir /data/streams
+      }
+    }
+    
+    # Trust proxy headers
+    trusted_proxies 10.0.0.0/8
+  }
+  ```
+</CodeGroup>
+
+## Storage Backend
+
+Durable Streams uses LMDB for production storage:
+
+### File-backed Storage
+
+```caddyfile
+:4437 {
+  route /v1/stream/* {
+    durable_streams {
+      data_dir /var/lib/durable-streams
+    }
+  }
+}
+```
+
+Storage structure:
+
+```
+/var/lib/durable-streams/
+├── streams.db/           # LMDB database
+│   ├── data.mdb
+│   └── lock.mdb
+└── segments/             # Stream data segments
+    ├── stream-1/
+    │   ├── 0000000000.seg
+    │   └── 0000001024.seg
+    └── stream-2/
+        └── 0000000000.seg
+```
+
+<Tip>
+Use SSD storage for best performance. LMDB provides excellent read performance with minimal write amplification.
+</Tip>
+
+### Backup and Recovery
+
+Backup the data directory regularly:
+
+```bash
+#!/bin/bash
+DATE=$(date +%Y%m%d-%H%M%S)
+BACKUP_DIR="/backups/durable-streams-$DATE"
+
+# Stop writes (optional - LMDB supports hot backups)
+systemctl stop durable-streams
+
+# Backup data directory
+cp -r /var/lib/durable-streams "$BACKUP_DIR"
+
+# Restart service
+systemctl start durable-streams
+
+echo "Backup created: $BACKUP_DIR"
+```
+
+## Deployment Patterns
+
+### Docker Deployment
+
+Create a `Dockerfile`:
+
+```dockerfile
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /build
+COPY . .
+
+RUN go build -o durable-streams-server ./cmd/caddy
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app
+COPY --from=builder /build/durable-streams-server .
+COPY Caddyfile .
+
+EXPOSE 4437
+
+VOLUME ["/data"]
+
+CMD ["./durable-streams-server", "run", "--config", "Caddyfile"]
+```
+
+Run with Docker:
+
+```bash
+# Build image
+docker build -t durable-streams .
+
+# Run container
+docker run -d \
+  -p 4437:4437 \
+  -v $(pwd)/data:/data \
+  --name durable-streams \
+  durable-streams
+```
+
+### Kubernetes Deployment
+
+Deploy with persistent storage:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: durable-streams-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: durable-streams
+spec:
+  replicas: 1  # Note: File store doesn't support multiple replicas
+  selector:
+    matchLabels:
+      app: durable-streams
+  template:
+    metadata:
+      labels:
+        app: durable-streams
+    spec:
+      containers:
+      - name: server
+        image: durable-streams:latest
+        ports:
+        - containerPort: 4437
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: durable-streams-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: durable-streams
+spec:
+  selector:
+    app: durable-streams
+  ports:
+  - port: 4437
+    targetPort: 4437
+  type: LoadBalancer
+```
+
+<Warning>
+The file-backed store currently supports single-instance deployments only. For horizontal scaling, use in-memory mode with a distributed cache layer.
+</Warning>
+
+### Systemd Service
+
+Create `/etc/systemd/system/durable-streams.service`:
+
+```ini
+[Unit]
+Description=Durable Streams Server
+After=network.target
+
+[Service]
+Type=simple
+User=durable-streams
+Group=durable-streams
+WorkingDirectory=/opt/durable-streams
+ExecStart=/usr/local/bin/durable-streams-server run --config /etc/durable-streams/Caddyfile
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/durable-streams
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable durable-streams
+sudo systemctl start durable-streams
+sudo systemctl status durable-streams
+```
+
+## CDN Integration
+
+Durable Streams is designed to work behind CDNs for massive scale:
+
+### Cloudflare Configuration
+
+```javascript
+// cloudflare-worker.js
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url)
+    
+    // Only cache GET requests with offset parameter
+    if (request.method === 'GET' && url.searchParams.has('offset')) {
+      const cacheKey = new Request(url.toString(), request)
+      const cache = caches.default
+      
+      // Check cache
+      let response = await cache.match(cacheKey)
+      
+      if (!response) {
+        // Fetch from origin
+        response = await fetch(request)
+        
+        // Cache if response has Cache-Control header
+        if (response.headers.get('Cache-Control')) {
+          await cache.put(cacheKey, response.clone())
+        }
+      }
+      
+      return response
+    }
+    
+    // Pass through all other requests
+    return fetch(request)
+  }
+}
+```
+
+### Caching Strategy
+
+Durable Streams uses cursor-based cache busting:
+
+1. **Historical reads** are cached with `Cache-Control: public, max-age=60`
+2. **Cursor parameter** changes when new data arrives, invalidating CDN cache
+3. **Live mode requests** bypass cache automatically
+
+<Info>
+The server automatically manages cache headers and cursors. No client-side configuration needed.
+</Info>
+
+## Monitoring
+
+### Health Check Endpoint
+
+Implement a health check:
+
+```bash
+curl http://localhost:4437/health
+```
+
+### Metrics Collection
+
+Add Prometheus metrics to your Caddyfile:
+
+```caddyfile
+{
+  admin off
+  servers {
+    metrics
+  }
+}
+
+:4437 {
+  route /v1/stream/* {
+    durable_streams {
+      data_dir /var/lib/durable-streams
+    }
+  }
+  
+  route /metrics {
+    metrics /metrics
+  }
+}
+```
+
+### Logging
+
+Configure structured logging:
+
+```caddyfile
+{
+  admin off
+  log {
+    output file /var/log/durable-streams/access.log
+    format json
+  }
+}
+```
+
+## Performance Tuning
+
+### Connection Limits
+
+For high-concurrency deployments:
+
+```caddyfile
+{
+  servers {
+    max_header_bytes 16KB
+  }
+}
+
+:4437 {
+  route /v1/stream/* {
+    durable_streams {
+      data_dir /var/lib/durable-streams
+      long_poll_timeout 30s
+    }
+  }
+}
+```
+
+### OS Tuning
+
+Increase file descriptor limits:
+
+```bash
+# /etc/security/limits.conf
+durable-streams soft nofile 65536
+durable-streams hard nofile 65536
+```
+
+## Security
+
+### Authentication
+
+Add authentication middleware:
+
+```caddyfile
+:4437 {
+  route /v1/stream/* {
+    # Validate JWT token
+    @authenticated {
+      header Authorization "Bearer *"
+    }
+    
+    handle @authenticated {
+      durable_streams {
+        data_dir /var/lib/durable-streams
+      }
+    }
+    
+    handle {
+      respond "Unauthorized" 401
+    }
+  }
+}
+```
+
+### CORS Configuration
+
+```caddyfile
+:4437 {
+  route /v1/stream/* {
+    header {
+      Access-Control-Allow-Origin https://app.example.com
+      Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+      Access-Control-Allow-Headers "Authorization, Content-Type"
+    }
+    
+    durable_streams {
+      data_dir /var/lib/durable-streams
+    }
+  }
+}
+```
+
+## Capacity Planning
+
+### Storage Requirements
+
+Estimate storage needs:
+
+- **Message size**: Average bytes per message
+- **Write rate**: Messages per second
+- **Retention**: How long to keep data
+
+**Example**: 1KB messages at 100/sec with 30-day retention:
+
+```
+1 KB × 100 msg/s × 86400 s/day × 30 days ≈ 259 GB
+```
+
+Add 20% overhead for metadata: **~310 GB**
+
+### Memory Requirements
+
+LMDB memory-maps files for efficient access:
+
+- **Minimum**: 512 MB
+- **Recommended**: 2-4 GB for production workloads
+- **High throughput**: 8+ GB
+
+## Migration and Upgrades
+
+### Zero-downtime Upgrades
+
+<Steps>
+  <Step title="Deploy new version">
+    Deploy the new version alongside the old:
+
+    ```bash
+    # Start new version on different port
+    durable-streams-server run --config Caddyfile.new &
+    ```
+  </Step>
+
+  <Step title="Migrate traffic">
+    Update load balancer to route new clients to new version
+  </Step>
+
+  <Step title="Drain old version">
+    Wait for active connections to complete, then stop old version:
+
+    ```bash
+    systemctl stop durable-streams-old
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Common Issues
+
+<AccordionGroup>
+  <Accordion title="High memory usage">
+    LMDB memory-maps files. This is expected and doesn't indicate a leak.
+    
+    Check actual resident memory with `ps aux | grep durable-streams`
+  </Accordion>
+
+  <Accordion title="Connection timeouts">
+    Increase `long_poll_timeout` or check network/firewall settings:
+    
+    ```caddyfile
+    durable_streams {
+      long_poll_timeout 60s
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Disk space errors">
+    Monitor disk usage and implement retention policies:
+    
+    ```bash
+    # Delete streams older than 30 days
+    find /var/lib/durable-streams/segments -mtime +30 -delete
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="book" href="/api/client-typescript">
+    Explore the complete API documentation
+  </Card>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/durable-streams/durable-streams">
+    Contribute or report issues on GitHub
+  </Card>
+</CardGroup>

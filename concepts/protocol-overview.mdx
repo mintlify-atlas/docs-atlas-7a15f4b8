@@ -1,0 +1,244 @@
+---
+title: Protocol Overview
+description: Understanding the Durable Streams HTTP-based protocol for ordered, replayable data streams
+---
+
+The Durable Streams Protocol is a minimal HTTP-based protocol for creating, appending to, and reading from durable, append-only byte streams. It provides a simple, web-native primitive for applications requiring ordered, replayable data streams with support for catch-up reads, live tailing, and explicit stream closure.
+
+## What is a stream?
+
+A stream is simply a URL-addressable, append-only byte stream that you can read and write to using standard HTTP methods. Streams are durable and immutable by position—new data can only be appended to the end.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { DurableStream } from '@durable-streams/client'
+
+// Create a new stream
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/my-stream',
+  headers: { Authorization: 'Bearer my-token' },
+  contentType: 'application/json'
+})
+```
+
+```python Python
+from durable_streams import DurableStream
+
+# Create a new stream
+stream = DurableStream.create(
+    url='https://streams.example.com/my-stream',
+    headers={'Authorization': 'Bearer my-token'},
+    content_type='application/json'
+)
+```
+
+```go Go
+import "github.com/durable-streams/client-go"
+
+// Create a new stream
+stream, err := client.CreateStream(ctx, client.CreateStreamOptions{
+    URL:         "https://streams.example.com/my-stream",
+    ContentType: "application/json",
+})
+```
+
+</CodeGroup>
+
+## Core operations
+
+The protocol defines six primary operations that work with stream URLs:
+
+<Steps>
+
+### Create
+
+Establish a new stream at a URL with optional initial content using `PUT`.
+
+```http
+PUT https://streams.example.com/my-stream
+Content-Type: application/json
+
+{"message": "initial data"}
+```
+
+### Append
+
+Add bytes to the end of an existing stream using `POST`.
+
+```http
+POST https://streams.example.com/my-stream
+Content-Type: application/json
+
+{"message": "new data"}
+```
+
+### Read
+
+Retrieve bytes starting from a given offset using `GET` with query parameters.
+
+```http
+GET https://streams.example.com/my-stream?offset=-1
+```
+
+### Close
+
+Transition a stream to closed state, optionally with a final append.
+
+```http
+POST https://streams.example.com/my-stream
+Stream-Closed: true
+
+{"message": "final data"}
+```
+
+### Head
+
+Query stream metadata without transferring data using `HEAD`.
+
+```http
+HEAD https://streams.example.com/my-stream
+```
+
+### Delete
+
+Remove a stream and all its data using `DELETE`.
+
+```http
+DELETE https://streams.example.com/my-stream
+```
+
+</Steps>
+
+## Stream properties
+
+Every stream has the following characteristics:
+
+<Note>
+**Durability**: Once written and acknowledged, bytes persist until the stream is deleted or expired.
+</Note>
+
+<Note>
+**Immutability by position**: Bytes at a given offset never change; new data is only appended.
+</Note>
+
+<Note>
+**Ordering**: Bytes are strictly ordered by offset.
+</Note>
+
+<Note>
+**Content type**: Each stream has a MIME content type set at creation (e.g., `application/json`, `text/plain`, `application/octet-stream`).
+</Note>
+
+## Independent read/write implementation
+
+Servers **may** implement the read and write paths independently. This flexibility enables different use cases:
+
+<CardGroup cols={2}>
+
+<Card title="Read-only server" icon="book-open">
+A database synchronization server may only implement the read path and use its own internal injection system for writes.
+</Card>
+
+<Card title="Full read/write server" icon="arrows-left-right">
+A collaborative editing service implements both paths to allow clients to append changes and read the stream.
+</Card>
+
+</CardGroup>
+
+## URL structure
+
+The protocol does not prescribe a specific URL structure. Servers may organize streams using any URL scheme they choose:
+
+- `/v1/stream/{path}`
+- `/streams/{id}`
+- Domain-specific paths like `/chat/room-1` or `/db/users/changes`
+
+The protocol is defined by the HTTP methods, query parameters, and headers applied to any stream URL, not by the URL format itself.
+
+## Example: Complete workflow
+
+Here's a complete example showing create, write, and read operations:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { DurableStream } from '@durable-streams/client'
+
+// Create a stream
+const stream = await DurableStream.create({
+  url: 'https://streams.example.com/chat/room-1',
+  headers: { Authorization: 'Bearer token' },
+  contentType: 'application/json'
+})
+
+// Write data
+await stream.append(JSON.stringify({ user: 'alice', message: 'hello' }))
+await stream.append(JSON.stringify({ user: 'bob', message: 'hi there' }))
+
+// Read from the beginning
+const response = await stream.stream<{ user: string; message: string }>()
+const messages = await response.json()
+console.log(messages)
+// [{ user: 'alice', message: 'hello' }, { user: 'bob', message: 'hi there' }]
+```
+
+```python Python
+from durable_streams import DurableStream
+import json
+
+# Create a stream
+stream = DurableStream.create(
+    url='https://streams.example.com/chat/room-1',
+    headers={'Authorization': 'Bearer token'},
+    content_type='application/json'
+)
+
+# Write data
+stream.append(json.dumps({'user': 'alice', 'message': 'hello'}))
+stream.append(json.dumps({'user': 'bob', 'message': 'hi there'}))
+
+# Read from the beginning
+response = stream.stream()
+messages = response.json()
+print(messages)
+# [{'user': 'alice', 'message': 'hello'}, {'user': 'bob', 'message': 'hi there'}]
+```
+
+</CodeGroup>
+
+## Why HTTP?
+
+Durable Streams uses HTTP because it:
+
+- Works universally across web browsers, mobile apps, native clients, IoT devices, and edge workers
+- Leverages existing infrastructure (CDNs, proxies, load balancers)
+- Supports standard authentication and authorization patterns
+- Enables caching and request collapsing for efficient scaling
+- Requires no custom protocols or special network configuration
+
+<Tip>
+The protocol is designed to be **CDN-friendly**, meaning a single origin server can efficiently serve millions of concurrent readers through CDN caching and request collapsing.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="Streams and Offsets" icon="map-pin" href="/concepts/streams-and-offsets">
+Learn how offset-based positioning enables resumable reads
+</Card>
+
+<Card title="Message Framing" icon="frame" href="/concepts/message-framing">
+Understand how different content types handle message boundaries
+</Card>
+
+<Card title="Live Modes" icon="signal-stream" href="/concepts/live-modes">
+Explore long-polling and SSE for real-time updates
+</Card>
+
+<Card title="Idempotent Producers" icon="shield-check" href="/concepts/idempotent-producers">
+Implement exactly-once write semantics
+</Card>
+
+</CardGroup>

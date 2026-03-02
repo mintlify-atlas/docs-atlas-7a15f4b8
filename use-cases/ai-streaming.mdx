@@ -1,0 +1,409 @@
+---
+title: AI Conversation Streaming
+description: Stream LLM responses with resume capability across reconnections, eliminating expensive re-generation when users disconnect
+---
+
+LLM inference is expensive. When a user's tab gets suspended, their network flaps, or they refresh the page, you don't want to re-run the generation—you want them to pick up exactly where they left off.
+
+Durable Streams makes AI conversation streaming production-ready with built-in resumability, exactly-once delivery, and multi-viewer support.
+
+## The problem with ephemeral streams
+
+Traditional SSE or WebSocket streaming for AI responses faces critical issues:
+
+- **Tab suspension** - Mobile browsers and backgrounded tabs kill connections mid-generation
+- **Page refresh** - Users lose partial responses, forcing expensive re-generation
+- **Network flaps** - Brief disconnections lose all in-flight tokens
+- **No sharing** - Can't share a live generation link with teammates
+- **No resumption** - Reconnections start from scratch or show nothing
+
+With Durable Streams, the generation continues server-side even if the client disconnects. Users reconnect and resume from their last seen token—no re-generation needed.
+
+## Basic implementation
+
+<Steps>
+  <Step title="Server: Stream tokens to durable stream">
+    Stream LLM tokens to a durable stream. The generation continues even if the client disconnects.
+
+    ```typescript
+    import { DurableStream } from "@durable-streams/client"
+
+    // Create a stream for this generation
+    const stream = await DurableStream.create({
+      url: `https://your-server.com/v1/stream/generation/${generationId}`,
+      contentType: "text/plain",
+    })
+
+    // Stream tokens as they arrive from the LLM
+    for await (const token of llm.stream(prompt)) {
+      await stream.append(token)
+    }
+
+    // Close stream when generation completes
+    await stream.close()
+    ```
+  </Step>
+
+  <Step title="Client: Resume from last position">
+    Clients read from their last seen offset. If they disconnect and reconnect, they continue from where they left off.
+
+    ```typescript
+    import { stream } from "@durable-streams/client"
+
+    // Resume from saved offset (or "-1" for new generation)
+    const res = await stream({
+      url: `https://your-server.com/v1/stream/generation/${generationId}`,
+      offset: lastSeenOffset,
+      live: true,
+    })
+
+    // Render tokens as they arrive
+    res.subscribe((chunk) => {
+      renderTokens(chunk.data)
+      saveOffset(chunk.offset) // Persist for next resume
+    })
+    ```
+  </Step>
+</Steps>
+
+## Production-grade implementation with IdempotentProducer
+
+For high-throughput, reliable token delivery with exactly-once guarantees, use `IdempotentProducer`:
+
+```typescript
+import {
+  DurableStream,
+  IdempotentProducer,
+  StaleEpochError,
+} from "@durable-streams/client"
+
+// Create stream for this generation
+const stream = await DurableStream.create({
+  url: `https://your-server.com/v1/stream/generation/${generationId}`,
+  contentType: "text/plain",
+})
+
+// Create idempotent producer for reliable, exactly-once delivery
+let fenced = false
+const producer = new IdempotentProducer(stream, generationId, {
+  autoClaim: true,  // Auto-recover if another worker took over
+  lingerMs: 10,     // Send batches every 10ms for low latency
+  onError: (error) => {
+    if (error instanceof StaleEpochError) {
+      fenced = true
+      console.log("Another worker took over, stopping gracefully")
+    }
+  },
+})
+
+// Stream tokens - fire-and-forget, automatically batched & pipelined
+for await (const token of llm.stream(prompt)) {
+  if (fenced) break
+  producer.append(token) // Don't await - errors go to onError callback
+}
+
+// Ensure all tokens are delivered before shutdown
+await producer.flush()
+await producer.close()
+```
+
+## What this enables
+
+<CardGroup cols={2}>
+  <Card title="Tab suspended" icon="moon">
+    User's tab gets suspended by the browser? They come back and catch up from their saved offset—no re-generation.
+  </Card>
+  
+  <Card title="Page refresh" icon="arrows-rotate">
+    User refreshes mid-generation? They continue from the last token, not from the beginning.
+  </Card>
+  
+  <Card title="Share live streams" icon="share-nodes">
+    Multiple viewers can watch the same stream in real-time. Share a generation link with teammates.
+  </Card>
+  
+  <Card title="Multi-device" icon="mobile-screen">
+    Start on mobile, continue on desktop—same stream, same position across all devices.
+  </Card>
+  
+  <Card title="Worker failover" icon="server">
+    If a worker crashes mid-generation, another can take over with a new epoch—no duplicate tokens.
+  </Card>
+  
+  <Card title="CDN scaling" icon="chart-line">
+    Shared streams leverage CDN caching. Thousands of viewers = one origin request.
+  </Card>
+</CardGroup>
+
+## Streaming structured output
+
+For structured LLM responses (JSON, code, etc.), use `application/json` content type:
+
+<CodeGroup>
+```typescript Server
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+const stream = await DurableStream.create({
+  url: `https://your-server.com/v1/stream/generation/${generationId}`,
+  contentType: "application/json",
+})
+
+const producer = new IdempotentProducer(stream, generationId, {
+  autoClaim: true,
+  lingerMs: 10,
+})
+
+// Stream structured events
+for await (const event of llm.streamStructured(prompt)) {
+  // Each event is a complete JSON object
+  producer.append(JSON.stringify(event))
+}
+
+await producer.flush()
+await producer.close()
+```
+
+```typescript Client
+import { stream } from "@durable-streams/client"
+
+const res = await stream({
+  url: `https://your-server.com/v1/stream/generation/${generationId}`,
+  offset: lastSeenOffset,
+  live: true,
+})
+
+// Receive structured events
+res.subscribeJson(async (batch) => {
+  for (const event of batch.items) {
+    // Each event is a parsed JSON object
+    handleEvent(event)
+  }
+  saveOffset(batch.offset)
+})
+```
+</CodeGroup>
+
+## Agentic applications
+
+For agentic apps that stream tool outputs and progress events over long-running sessions:
+
+```typescript
+import { DurableStream, IdempotentProducer } from "@durable-streams/client"
+
+const stream = await DurableStream.create({
+  url: `https://your-server.com/v1/stream/agent/${sessionId}`,
+  contentType: "application/json",
+})
+
+const producer = new IdempotentProducer(stream, `agent-${sessionId}`, {
+  autoClaim: true,
+})
+
+// Stream agent progress events
+for await (const event of agent.run(task)) {
+  producer.append(JSON.stringify({
+    type: event.type, // "thinking", "tool_call", "result", etc.
+    timestamp: Date.now(),
+    data: event.data,
+  }))
+}
+
+await producer.flush()
+await producer.close()
+```
+
+Clients receive all events in order, even across reconnections:
+
+```typescript
+const res = await stream({
+  url: `https://your-server.com/v1/stream/agent/${sessionId}`,
+  offset: lastSeenOffset,
+  live: true,
+})
+
+res.subscribeJson(async (batch) => {
+  for (const event of batch.items) {
+    switch (event.type) {
+      case "thinking":
+        showThinkingIndicator(event.data)
+        break
+      case "tool_call":
+        renderToolCall(event.data)
+        break
+      case "result":
+        displayResult(event.data)
+        break
+    }
+  }
+  saveOffset(batch.offset)
+})
+```
+
+## Handling generation errors
+
+<Tip>
+Store error states in the stream itself so clients see them on reconnection:
+</Tip>
+
+```typescript
+try {
+  for await (const token of llm.stream(prompt)) {
+    producer.append(token)
+  }
+  await producer.flush()
+  await producer.close()
+} catch (error) {
+  // Write error as final message before closing
+  const errorMessage = JSON.stringify({
+    type: "error",
+    message: error.message,
+    timestamp: Date.now(),
+  })
+  await producer.close(errorMessage)
+}
+```
+
+Clients check the `streamClosed` flag to detect completion:
+
+```typescript
+res.subscribeJson(async (batch) => {
+  for (const event of batch.items) {
+    if (event.type === "error") {
+      showError(event.message)
+    } else {
+      renderTokens(event)
+    }
+  }
+  
+  if (batch.streamClosed) {
+    console.log("Generation complete")
+  }
+  
+  saveOffset(batch.offset)
+})
+```
+
+## Multi-viewer scenarios
+
+<Info>
+A stream is just a URL. Multiple viewers can watch the same stream together in real-time without duplicating work.
+</Info>
+
+### Shared debugging
+
+```typescript
+// Customer support watching a user's AI session
+const res = await stream({
+  url: `https://your-server.com/v1/stream/user/${userId}/session/${sessionId}`,
+  offset: "-1", // Watch from beginning
+  live: true,
+})
+
+res.subscribe((chunk) => {
+  // Support agent sees same tokens as user in real-time
+  console.log(chunk.data)
+})
+```
+
+### Live collaboration
+
+```typescript
+// Team watching a shared AI brainstorming session
+const res = await stream({
+  url: `https://your-server.com/v1/stream/workspace/${workspaceId}/brainstorm`,
+  offset: "now", // Skip history, join live
+  live: true,
+})
+
+res.subscribeJson(async (batch) => {
+  for (const idea of batch.items) {
+    displayIdea(idea)
+  }
+})
+```
+
+## Performance optimization
+
+### Batching for throughput
+
+```typescript
+const producer = new IdempotentProducer(stream, generationId, {
+  maxBatchBytes: 1024 * 1024, // 1MB batches
+  lingerMs: 50,               // Wait up to 50ms to accumulate batch
+  maxInFlight: 5,             // Pipeline up to 5 concurrent batches
+})
+
+// High-throughput streaming - batched automatically
+for await (const token of llm.stream(prompt)) {
+  producer.append(token) // Returns immediately
+}
+```
+
+### Low-latency configuration
+
+```typescript
+const producer = new IdempotentProducer(stream, generationId, {
+  lingerMs: 10,      // Send batches every 10ms for low latency
+  maxBatchBytes: 4096, // Smaller batches for faster delivery
+})
+```
+
+## CDN configuration
+
+<Note>
+Configure your CDN to cache historical reads and collapse concurrent requests to the same offset.
+</Note>
+
+Example Cloudflare configuration:
+
+```javascript
+// Cloudflare Worker
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url)
+    
+    // Cache historical reads (offset != "now")
+    if (url.searchParams.get("offset") !== "now") {
+      const cache = caches.default
+      let response = await cache.match(request)
+      
+      if (!response) {
+        response = await fetch(request)
+        // Cache for 60 seconds with stale-while-revalidate
+        response = new Response(response.body, {
+          ...response,
+          headers: {
+            ...response.headers,
+            "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+          },
+        })
+        await cache.put(request, response.clone())
+      }
+      
+      return response
+    }
+    
+    return fetch(request)
+  },
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Idempotent Producer" icon="shield-check" href="/api/client-typescript">
+    Learn about exactly-once delivery guarantees
+  </Card>
+  
+  <Card title="Client Libraries" icon="code" href="/api/client-typescript">
+    Explore streaming APIs for all platforms
+  </Card>
+  
+  <Card title="SSE vs Long-Poll" icon="arrows-split-up-and-left" href="/concepts/live-modes">
+    Choose the right live mode for your use case
+  </Card>
+  
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Handle errors and implement retry strategies
+  </Card>
+</CardGroup>

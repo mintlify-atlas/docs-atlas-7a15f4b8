@@ -1,0 +1,440 @@
+---
+title: CLI Commands
+description: Command-line interface reference for Durable Streams
+---
+
+The `durable-stream` CLI provides a command-line interface for creating, writing to, reading from, and deleting Durable Streams.
+
+## Installation
+
+```bash
+npm install -g @durable-streams/cli
+```
+
+Or use with `npx`:
+
+```bash
+npx @durable-streams/cli [command] [options]
+```
+
+## Global Options
+
+These options can be used with any command and must appear before the command name.
+
+<ParamField path="--url" type="string">
+  Stream server URL. Overrides the `STREAM_URL` environment variable.
+  
+  **Default:** `http://localhost:4437/v1/stream`
+  
+  **Example:**
+  ```bash
+  durable-stream --url https://api.example.com/v1/stream create my-stream
+  ```
+</ParamField>
+
+<ParamField path="--auth" type="string">
+  Authorization header value for authenticating with the stream server. Overrides the `STREAM_AUTH` environment variable.
+  
+  Common formats:
+  - `Bearer <token>`
+  - `Basic <credentials>`
+  - `ApiKey <key>`
+  
+  **Example:**
+  ```bash
+  durable-stream --auth "Bearer my-token" create my-stream
+  ```
+</ParamField>
+
+<ParamField path="--help" type="boolean">
+  Display help information and exit.
+  
+  **Aliases:** `-h`
+  
+  **Example:**
+  ```bash
+  durable-stream --help
+  ```
+</ParamField>
+
+## Environment Variables
+
+<ParamField path="STREAM_URL" type="string">
+  Base URL of the stream server. Used when `--url` flag is not provided.
+  
+  **Default:** `http://localhost:4437/v1/stream`
+  
+  **Example:**
+  ```bash
+  export STREAM_URL=https://api.example.com/v1/stream
+  durable-stream create my-stream
+  ```
+</ParamField>
+
+<ParamField path="STREAM_AUTH" type="string">
+  Authorization header value. Used when `--auth` flag is not provided.
+  
+  **Example:**
+  ```bash
+  export STREAM_AUTH="Bearer my-token"
+  durable-stream create my-stream
+  ```
+</ParamField>
+
+## Commands
+
+### create
+
+Create a new stream with the specified stream ID.
+
+**Syntax:**
+```bash
+durable-stream create <stream_id> [options]
+```
+
+**Arguments:**
+
+<ParamField path="stream_id" type="string" required>
+  Unique identifier for the stream. Must be 1-256 characters containing only letters, numbers, underscores, hyphens, dots, and colons.
+  
+  **Valid examples:** `my-stream`, `user_123`, `logs.production`, `metrics:cpu`
+</ParamField>
+
+**Options:**
+
+<ParamField path="--content-type" type="string">
+  Content-Type for the stream.
+  
+  **Default:** `application/octet-stream`
+  
+  **Examples:**
+  - `--content-type application/json`
+  - `--content-type text/plain`
+  - `--content-type application/octet-stream`
+</ParamField>
+
+<ParamField path="--json" type="boolean">
+  Shorthand for `--content-type application/json`. Enables JSON mode for the stream.
+</ParamField>
+
+**Examples:**
+
+Create a basic stream:
+```bash
+durable-stream create my-stream
+```
+
+Create a JSON stream:
+```bash
+durable-stream create events --json
+```
+
+Create a stream with custom content type:
+```bash
+durable-stream create logs --content-type text/plain
+```
+
+**Output:**
+```
+Stream created successfully: "my-stream"
+  URL: http://localhost:4437/v1/stream/my-stream
+```
+
+### write
+
+Write content to an existing stream. Content can be provided as a command argument or piped from stdin.
+
+**Syntax:**
+```bash
+durable-stream write <stream_id> [content] [options]
+cat file.txt | durable-stream write <stream_id> [options]
+```
+
+**Arguments:**
+
+<ParamField path="stream_id" type="string" required>
+  The ID of the stream to write to.
+</ParamField>
+
+<ParamField path="content" type="string">
+  The content to write to the stream. If not provided, content will be read from stdin.
+  
+  Supports escape sequences:
+  - `\n` - newline
+  - `\t` - tab
+  - `\r` - carriage return
+  - `\\` - backslash
+</ParamField>
+
+**Options:**
+
+<ParamField path="--content-type" type="string">
+  Content-Type for this write operation.
+  
+  **Default:** `application/octet-stream`
+</ParamField>
+
+<ParamField path="--json" type="boolean">
+  Shorthand for `--content-type application/json`. Write content as JSON.
+</ParamField>
+
+<ParamField path="--batch-json" type="boolean">
+  Write content as a JSON array, with each array element stored as a separate message. Automatically sets `--content-type application/json`.
+  
+  Arrays are flattened one level deep:
+  - `[1, 2, 3]` → 3 messages: `1`, `2`, `3`
+  - `{"foo": "bar"}` → 1 message: `{"foo": "bar"}`
+</ParamField>
+
+**Examples:**
+
+Write text content:
+```bash
+durable-stream write my-stream "Hello, World!"
+```
+
+Write content with escape sequences:
+```bash
+durable-stream write my-stream "Line 1\nLine 2\nLine 3"
+```
+
+Write JSON content:
+```bash
+durable-stream write events --json '{"event": "user.signup", "userId": 123}'
+```
+
+Write from stdin:
+```bash
+echo "Hello from stdin" | durable-stream write my-stream
+```
+
+Pipe file content:
+```bash
+cat logfile.txt | durable-stream write logs
+```
+
+Write JSON array as batch:
+```bash
+durable-stream write events --batch-json '[{"id": 1}, {"id": 2}, {"id": 3}]'
+```
+
+**Output:**
+
+For binary/text content:
+```
+Wrote 13 bytes to stream "my-stream"
+```
+
+For JSON content:
+```
+Wrote 1 JSON message to stream "events"
+```
+
+For batch JSON:
+```
+Wrote 3 messages to stream "events"
+```
+
+### read
+
+Read from a stream and write the output to stdout. Follows the stream in live mode, catching up on existing data first, then streaming new data as it arrives.
+
+**Syntax:**
+```bash
+durable-stream read <stream_id>
+```
+
+**Arguments:**
+
+<ParamField path="stream_id" type="string" required>
+  The ID of the stream to read from.
+</ParamField>
+
+**Examples:**
+
+Read and follow a stream:
+```bash
+durable-stream read my-stream
+```
+
+Read and pipe to a file:
+```bash
+durable-stream read logs > output.txt
+```
+
+Read and process with jq (for JSON streams):
+```bash
+durable-stream read events | jq '.event'
+```
+
+**Behavior:**
+
+- Uses live mode with catch-up: reads all existing data first, then switches to streaming new data
+- Streams data directly to stdout as it arrives
+- Continues running until interrupted (Ctrl+C)
+- Handles reconnections automatically
+
+### delete
+
+Delete an existing stream and all its data.
+
+**Syntax:**
+```bash
+durable-stream delete <stream_id>
+```
+
+**Arguments:**
+
+<ParamField path="stream_id" type="string" required>
+  The ID of the stream to delete.
+</ParamField>
+
+**Examples:**
+
+Delete a stream:
+```bash
+durable-stream delete my-stream
+```
+
+**Output:**
+```
+Stream deleted successfully: "my-stream"
+```
+
+## Complete Examples
+
+### Working with JSON Streams
+
+Create a JSON stream and write events:
+```bash
+# Create stream
+durable-stream create events --json
+
+# Write individual events
+durable-stream write events --json '{"event": "user.login", "userId": 1}'
+durable-stream write events --json '{"event": "user.logout", "userId": 1}'
+
+# Write batch of events
+durable-stream write events --batch-json '[
+  {"event": "page.view", "page": "/home"},
+  {"event": "page.view", "page": "/about"},
+  {"event": "page.view", "page": "/contact"}
+]'
+
+# Read and filter events
+durable-stream read events | jq 'select(.event == "user.login")'
+```
+
+### Working with Text Streams
+
+Create a log stream:
+```bash
+# Create stream
+durable-stream create logs --content-type text/plain
+
+# Write log entries
+durable-stream write logs "2024-01-01 10:00:00 INFO Server started"
+durable-stream write logs "2024-01-01 10:00:01 INFO Request received"
+
+# Stream logs to file
+durable-stream read logs > application.log
+```
+
+### Piping Data
+
+Pipe application logs to a stream:
+```bash
+# Create stream
+durable-stream create app-logs
+
+# Pipe logs continuously
+tail -f /var/log/app.log | durable-stream write app-logs
+
+# Read logs in another terminal
+durable-stream read app-logs
+```
+
+### Using with Authentication
+
+Set up authentication:
+```bash
+# Using environment variable
+export STREAM_AUTH="Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+durable-stream create secure-stream
+
+# Using command-line flag
+durable-stream --auth "Bearer my-token" write secure-stream "sensitive data"
+
+# Using custom server URL
+durable-stream --url https://streams.example.com/v1/stream \
+  --auth "Bearer my-token" \
+  create production-logs
+```
+
+## Error Handling
+
+The CLI provides helpful error messages for common issues:
+
+**Invalid stream ID:**
+```bash
+durable-stream create "invalid stream!"
+# Error: Invalid stream ID: "invalid stream!"
+#   Stream IDs can only contain letters, numbers, underscores, hyphens, dots, and colons
+```
+
+**Missing stream ID:**
+```bash
+durable-stream create
+# Error: Missing stream_id
+#   Usage: durable-stream create <stream_id>
+```
+
+**Unknown command:**
+```bash
+durable-stream unknown
+# Error: Unknown command "unknown"
+#   Available commands: create, write, read, delete
+#   Run "durable-stream --help" for usage information
+```
+
+**Invalid URL:**
+```bash
+durable-stream --url invalid-url create test
+# Error: Invalid URL format: "invalid-url"
+#   Expected format: http://host:port or https://host:port
+```
+
+**No content provided for write:**
+```bash
+durable-stream write my-stream
+# Error: No content provided
+#   Provide content as an argument or pipe from stdin:
+#     durable-stream write my-stream "your content here"
+#     echo "content" | durable-stream write my-stream
+```
+
+## Exit Codes
+
+- `0` - Success
+- `1` - Error (validation error, network error, or stream operation failed)
+
+## Stream ID Validation
+
+Stream IDs must meet the following requirements:
+
+- Length: 1-256 characters
+- Allowed characters: letters (a-z, A-Z), numbers (0-9), underscore (`_`), hyphen (`-`), dot (`.`), and colon (`:`)
+- No spaces or special characters
+
+**Valid examples:**
+- `my-stream`
+- `user_events`
+- `logs.production`
+- `metrics:cpu:usage`
+- `stream123`
+
+**Invalid examples:**
+- `my stream` (contains space)
+- `user@events` (contains @)
+- `logs/production` (contains /)
+- `` (empty string)

@@ -1,0 +1,580 @@
+---
+title: "Java Client"
+description: "API reference for the com.durablestreams Java library"
+---
+
+# Java Client
+
+The official Java client for Durable Streams protocol using java.net.http.HttpClient.
+
+## Installation
+
+### Maven
+
+```xml
+<dependency>
+    <groupId>com.durablestreams</groupId>
+    <artifactId>durable-streams</artifactId>
+    <version>0.1.0</version>
+</dependency>
+```
+
+### Gradle
+
+```gradle
+implementation 'com.durablestreams:durable-streams:0.1.0'
+```
+
+Requires Java 11 or later
+
+## Quick Start
+
+```java
+import com.durablestreams.*;
+import com.durablestreams.model.*;
+import com.google.gson.Gson;
+
+public class Example {
+    public static void main(String[] args) {
+        // Create client
+        DurableStream client = DurableStream.create();
+
+        String url = "https://streams.example.com/my-stream";
+
+        // Create stream
+        client.create(url, "application/json");
+
+        // Append data
+        String json = new Gson().toJson(Map.of("message", "hello"));
+        AppendResult result = client.append(url, json.getBytes());
+        System.out.println("Offset: " + result.nextOffset().getValue());
+
+        // Read data
+        try (JsonIterator<Event> it = client.readJson(url, json -> 
+            new Gson().fromJson(json, new TypeToken<List<Event>>(){}.getType())
+        )) {
+            for (Event event : it.items()) {
+                System.out.println("Event: " + event.getId());
+            }
+        }
+    }
+}
+```
+
+## Core APIs
+
+### DurableStream
+
+Main client class (thread-safe, use singleton pattern).
+
+<ParamField path="DurableStream.create()" type="static">
+  Create a client with default settings
+
+  Returns: `DurableStream`
+</ParamField>
+
+<ParamField path="DurableStream.builder()" type="static">
+  Create a builder for custom configuration
+
+  Returns: `DurableStream.Builder`
+</ParamField>
+
+**Example:**
+
+```java
+DurableStream client = DurableStream.builder()
+    .httpClient(customHttpClient)
+    .retryPolicy(RetryPolicy.defaults())
+    .header("Authorization", "Bearer token")
+    .header("X-Request-ID", () -> UUID.randomUUID().toString())
+    .build();
+```
+
+#### Write Operations
+
+<ParamField path="create()" type="method">
+  Create a new stream
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="contentType" type="String" required>
+    Content type (e.g., `"application/json"`)
+  </ParamField>
+
+  Throws: `StreamExistsException` if stream already exists
+</ParamField>
+
+<ParamField path="create()" type="method (overload)">
+  Create a stream with full options
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="contentType" type="String" required>
+    Content type
+  </ParamField>
+  <ParamField path="ttl" type="Duration">
+    Time-to-live
+  </ParamField>
+  <ParamField path="expiresAt" type="Instant">
+    Absolute expiry time
+  </ParamField>
+  <ParamField path="closed" type="boolean" default="false">
+    Create in closed state
+  </ParamField>
+  <ParamField path="data" type="byte[]">
+    Optional initial data
+  </ParamField>
+</ParamField>
+
+<ParamField path="append()" type="method">
+  Append data to a stream
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="data" type="byte[]" required>
+    Data to append (for JSON, marshal first)
+  </ParamField>
+
+  Returns: `AppendResult` with `nextOffset()` and `etag()`
+
+  Throws: `StreamNotFoundException`, `StreamClosedException`, `DurableStreamException`
+</ParamField>
+
+**Example:**
+
+```java
+// JSON stream - marshal first
+Gson gson = new Gson();
+Map<String, String> message = Map.of("message", "hello");
+byte[] json = gson.toJson(message).getBytes();
+
+AppendResult result = client.append(url, json);
+System.out.println("Next offset: " + result.nextOffset().getValue());
+
+// Byte stream
+client.append(url, "raw bytes".getBytes());
+```
+
+<ParamField path="appendAsync()" type="method">
+  Append data asynchronously
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="data" type="byte[]" required>
+    Data to append
+  </ParamField>
+
+  Returns: `CompletableFuture<AppendResult>`
+</ParamField>
+
+<ParamField path="close()" type="method">
+  Close a stream permanently (no more appends)
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+
+  Returns: `CloseResult` with `finalOffset()`
+
+  Throws: `StreamClosedException` if already closed with data
+</ParamField>
+
+<ParamField path="close()" type="method (overload)">
+  Close with optional final message
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="data" type="byte[]">
+    Final message
+  </ParamField>
+  <ParamField path="contentType" type="String">
+    Content type
+  </ParamField>
+
+  Returns: `CloseResult`
+</ParamField>
+
+<ParamField path="delete()" type="method">
+  Delete a stream
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+
+  Throws: `StreamNotFoundException` if stream doesn't exist
+</ParamField>
+
+#### Read Operations
+
+<ParamField path="read()" type="method">
+  Read from a stream (catch-up mode, from beginning)
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+
+  Returns: `ChunkIterator`
+</ParamField>
+
+<ParamField path="read()" type="method (overload)">
+  Read with options
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="options" type="ReadOptions" required>
+    <ParamField path="offset(Offset)" type="builder method">
+      Starting offset (default: `Offset.START`)
+    </ParamField>
+    <ParamField path="liveMode(LiveMode)" type="builder method">
+      Live mode: `OFF`, `LONG_POLL`, `SSE`
+    </ParamField>
+    <ParamField path="timeout(Duration)" type="builder method">
+      Request timeout
+    </ParamField>
+    <ParamField path="cursor(String)" type="builder method">
+      Stream cursor for CDN collapsing
+    </ParamField>
+  </ParamField>
+
+  Returns: `ChunkIterator`
+</ParamField>
+
+**Example:**
+
+```java
+import com.durablestreams.model.ReadOptions;
+import com.durablestreams.model.LiveMode;
+import com.durablestreams.model.Offset;
+
+try (ChunkIterator it = client.read(url, 
+    ReadOptions.builder()
+        .offset(lastOffset)
+        .liveMode(LiveMode.LONG_POLL)
+        .timeout(Duration.ofSeconds(30))
+        .build()
+)) {
+    while (it.hasNext()) {
+        Chunk chunk = it.next();
+        System.out.printf("Got %d bytes at offset %s%n", 
+            chunk.data().length, chunk.offset().getValue());
+
+        // Save checkpoint
+        saveOffset(chunk.offset());
+    }
+}
+```
+
+<ParamField path="readJson()" type="method">
+  Read JSON with type-safe parsing
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="parser" type="Function<String, List<T>>" required>
+    JSON parser function (use Gson, Jackson, etc.)
+  </ParamField>
+
+  Returns: `JsonIterator<T>`
+</ParamField>
+
+**Example with Gson:**
+
+```java
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import java.lang.reflect.Type;
+
+Gson gson = new Gson();
+Type listType = new TypeToken<List<Event>>(){}.getType();
+
+try (JsonIterator<Event> it = client.readJson(url, json -> 
+    gson.fromJson(json, listType)
+)) {
+    for (Event event : it.items()) {
+        System.out.println("Event: " + event.getId());
+    }
+
+    // Save checkpoint per batch
+    saveOffset(it.currentBatch().offset());
+}
+```
+
+<ParamField path="head()" type="method">
+  Get stream metadata
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+
+  Returns: `Metadata` with `contentType()`, `nextOffset()`, `streamClosed()`
+</ParamField>
+
+### ChunkIterator
+
+Iterator for reading raw byte chunks (implements `Iterator<Chunk>` and `AutoCloseable`).
+
+<ParamField path="hasNext()" type="method">
+  Check if more chunks available
+
+  Returns: `boolean`
+</ParamField>
+
+<ParamField path="next()" type="method">
+  Get next chunk
+
+  Returns: `Chunk` with `data()`, `offset()`, `upToDate()`, `cursor()`
+
+  Throws: `NoSuchElementException` if no more chunks
+</ParamField>
+
+<ParamField path="close()" type="method">
+  Close the iterator and release resources
+</ParamField>
+
+### JsonIterator&lt;T&gt;
+
+Type-safe JSON iteration (implements `Iterator<JsonBatch<T>>` and `AutoCloseable`).
+
+```java
+public class Event {
+    private String id;
+    private String type;
+    private Map<String, Object> data;
+    // getters/setters
+}
+
+try (JsonIterator<Event> it = client.readJson(url, parser)) {
+    for (Event event : it.items()) {
+        processEvent(event);
+    }
+
+    // Get current batch for checkpointing
+    JsonBatch<Event> batch = it.currentBatch();
+    saveOffset(batch.offset());
+}
+```
+
+<ParamField path="items()" type="method">
+  Iterate over individual items across all batches
+
+  Returns: `Iterable<T>`
+</ParamField>
+
+<ParamField path="batches()" type="method">
+  Iterate over batches (for checkpointing)
+
+  Returns: `Iterable<JsonBatch<T>>`
+</ParamField>
+
+<ParamField path="currentBatch()" type="method">
+  Get the current batch
+
+  Returns: `JsonBatch<T>`
+</ParamField>
+
+### IdempotentProducer
+
+Exactly-once writes with automatic batching and pipelining.
+
+```java
+import com.durablestreams.IdempotentProducer;
+
+IdempotentProducer producer = client.producer(
+    url,
+    "order-service-1",
+    IdempotentProducer.Config.defaults()
+        .withEpoch(0)
+        .withAutoClaim(true)
+        .withMaxBatchBytes(1024 * 1024)
+);
+
+// Fire-and-forget writes
+producer.append("{\"orderId\":\"123\"}".getBytes());
+producer.append("{\"orderId\":\"456\"}".getBytes());
+
+// Ensure delivery
+producer.flush();
+producer.close();
+```
+
+<ParamField path="producer()" type="method">
+  Create an idempotent producer
+
+  <ParamField path="url" type="String" required>
+    Stream URL
+  </ParamField>
+  <ParamField path="producerId" type="String" required>
+    Stable identifier
+  </ParamField>
+  <ParamField path="config" type="IdempotentProducer.Config">
+    <ParamField path="epoch" type="int" default="0">
+      Starting epoch
+    </ParamField>
+    <ParamField path="autoClaim" type="boolean" default="false">
+      Auto-retry with epoch+1 on 403
+    </ParamField>
+    <ParamField path="maxBatchBytes" type="int" default="1048576">
+      Max batch size (1MB)
+    </ParamField>
+    <ParamField path="lingerMs" type="int" default="5">
+      Max wait before sending batch
+    </ParamField>
+    <ParamField path="maxInFlight" type="int" default="5">
+      Max concurrent batches
+    </ParamField>
+  </ParamField>
+
+  Returns: `IdempotentProducer`
+</ParamField>
+
+<ParamField path="append()" type="method">
+  Fire-and-forget append (blocks until added to batch)
+
+  <ParamField path="data" type="byte[]" required>
+    Data to append
+  </ParamField>
+
+  Throws: `DurableStreamException` if producer is closed
+</ParamField>
+
+<ParamField path="flush()" type="method">
+  Send pending batch and wait for all in-flight batches
+
+  Throws: `DurableStreamException` on failure
+</ParamField>
+
+<ParamField path="close()" type="method (AutoCloseable)">
+  Flush and close the producer
+</ParamField>
+
+## Types
+
+### Offset
+
+```java
+public record Offset(String value) {
+    public static final Offset START = new Offset("-1");
+
+    public static Offset of(String value) {
+        return new Offset(value);
+    }
+
+    public String getValue() {
+        return value;
+    }
+}
+```
+
+### LiveMode
+
+```java
+public enum LiveMode {
+    OFF,        // Catch-up only
+    LONG_POLL,  // Long-polling
+    SSE;        // Server-Sent Events
+
+    String getWireValue() {
+        return switch (this) {
+            case LONG_POLL -> "long-poll";
+            case SSE -> "sse";
+            default -> null;
+        };
+    }
+}
+```
+
+### JsonBatch&lt;T&gt;
+
+```java
+public record JsonBatch<T>(
+    List<T> items,
+    Offset offset,
+    boolean upToDate,
+    String cursor
+) {}
+```
+
+## Error Handling
+
+```java
+import com.durablestreams.exception.*;
+
+try {
+    client.append(url, data);
+} catch (StreamNotFoundException e) {
+    System.err.println("Stream not found: " + e.getUrl());
+} catch (StreamClosedException e) {
+    System.err.println("Stream closed: " + e.getUrl());
+} catch (SequenceConflictException e) {
+    System.err.println("Sequence conflict");
+} catch (DurableStreamException e) {
+    System.err.println("Error: " + e.getMessage());
+    e.getStatusCode().ifPresent(code -> 
+        System.err.println("Status: " + code));
+}
+```
+
+### Exception Hierarchy
+
+- `DurableStreamException` - Base exception
+  - `StreamNotFoundException` - 404
+  - `StreamExistsException` - 409 on create
+  - `StreamClosedException` - 409 with Stream-Closed header
+  - `SequenceConflictException` - 409 sequence conflict
+  - `StaleEpochException` - 403 for producers
+  - `OffsetGoneException` - 410 retention expired
+  - `ParseErrorException` - JSON parse error
+
+## Advanced Features
+
+### Custom HTTP Client
+
+```java
+import java.net.http.HttpClient;
+import java.time.Duration;
+
+HttpClient httpClient = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)
+    .connectTimeout(Duration.ofSeconds(30))
+    .executor(Executors.newFixedThreadPool(10))
+    .build();
+
+DurableStream client = DurableStream.builder()
+    .httpClient(httpClient)
+    .build();
+```
+
+### Retry Policy
+
+```java
+import com.durablestreams.internal.RetryPolicy;
+
+RetryPolicy retryPolicy = RetryPolicy.builder()
+    .maxRetries(5)
+    .initialDelay(Duration.ofMillis(100))
+    .maxDelay(Duration.ofSeconds(5))
+    .backoffMultiplier(2.0)
+    .build();
+
+DurableStream client = DurableStream.builder()
+    .retryPolicy(retryPolicy)
+    .build();
+```
+
+### Try-with-resources
+
+```java
+try (DurableStream client = DurableStream.create()) {
+    // Use client
+} // Automatically closes executor
+```
+
+## Source Code
+
+Source: [packages/client-java/src/main/java/com/durablestreams/](/source/packages/client-java/src/main/java/com/durablestreams/DurableStream.java)
